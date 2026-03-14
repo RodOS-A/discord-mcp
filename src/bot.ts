@@ -113,7 +113,7 @@ async function askOllama(channelId: string, userInput: string, username: string)
 
   // Strip thinking tokens BEFORE saving to history — prevents the model from
   // receiving its own reasoning as context in subsequent turns.
-  const reply = stripThinkingTokens(response.message.content);
+  const reply = stripThinkingTokens(response.message.content) || '...';
   appendHistory(channelId, 'assistant', reply);
   return reply;
 }
