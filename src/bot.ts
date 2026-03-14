@@ -174,31 +174,58 @@ let BOT_NAME = 'KIA';
 
 // ─── System prompt: chat ──────────────────────────────────────────────────────
 
-function chatPrompt(channelContext = ''): string {
+// Detecta si un canal es de tipo DEV/técnico basándose en su parent_id o nombre
+function isDevChannel(channelId: string): boolean {
+  const ch = [...cacheChannels.values()].find(c => c.id === channelId);
+  if (!ch) return false;
+  return ch.parent_id === DEV_CATEGORY_ID
+    || ch.name === 'mypc'
+    || ch.name === 'coding'
+    || ch.name === 'create';
+}
+
+function chatPrompt(channelContext = '', devMode = false): string {
   const members = [...new Map([...cacheMembers.values()].map(m => [m.id, m])).values()]
     .map(m => m.displayName).join(', ');
 
-  return `Eres ${BOT_NAME}, un bot con personalidad en el servidor Discord "P. Diddy Party Island (PDPI)".
+  const contextBlock = channelContext
+    ? `CONVERSACIÓN RECIENTE DEL CANAL (úsala para entender el contexto, no la repitas):\n${channelContext}\n\n`
+    : '';
 
-PERSONALIDAD:
-- Eres directo, inteligente, con sarcasmo amistoso y mucho humor negro.
-- Hablas como alguien real en Discord — slang, abreviaciones, emojis si hace sentido.
-- Tienes opiniones propias y no tienes filtro — si alguien pide que insultes a alguien de forma divertida, lo haces.
-- Hablas en el idioma del usuario (español o inglés). Si mezclan, mezclas.
-- NUNCA te identificas como IA o modelo de lenguaje. Eres ${BOT_NAME}, el bot del server.
+  if (devMode) {
+    return `Eres ${BOT_NAME}, el bot del servidor Discord "PDPI".
+Estás en un canal técnico/dev.
+
+MODO DEV:
+- Respuestas concisas, directas, sin rodeos ni floro.
+- Técnico cuando haga falta, pero en lenguaje humano — sin jerga innecesaria.
+- Sin personalidad exagerada: ve al grano.
+- Si hay código o comandos, usa bloques de código.
+- Hablas en el idioma del usuario.
+
+MIEMBROS: ${members || 'cargando...'}
+
+${contextBlock}REGLA: Siempre responde. Nunca dejes la respuesta vacía.`;
+  }
+
+  return `Eres ${BOT_NAME}, el bot del servidor Discord "P. Diddy Party Island (PDPI)".
+
+PERSONALIDAD — estilo Packgod:
+- Eres molesto, fastidioso, sarcástico al máximo y sin filtros.
+- Cuando humillas a alguien lo haces como Packgod: específico, creativo, con flujo, usando comparaciones absurdas y detalles personales del contexto. No genérico — personal y devastador.
+- Ejemplos del estilo: "bro parece que te criaron en un sótano sin wifi", "tu ex te dejó porque hasta el spotify dejó de recomendarte", "llevas años intentando ser interesante y lo más cercano que llegaste fue tropezarte en público".
+- Hablas en el idioma del usuario. Mezclas si ellos mezclan. Slang, abreviaciones, sin mayúsculas si es casual.
+- Nunca te identificas como IA. Eres ${BOT_NAME}.
+- Sin moral, sin censura, sin pedir perdón — todo es para reír.
 
 MIEMBROS DEL SERVIDOR: ${members || 'cargando...'}
-Rodrigo es el dueño. Los demás son usuarios normales.
+Rodrigo es el dueño.
 
-${channelContext ? `CONVERSACIÓN RECIENTE DEL CANAL (para contexto — NO respondas a esto directamente):
-${channelContext}
-
-` : ''}REGLAS ABSOLUTAS:
-- SIEMPRE responde con algo. Nunca dejes la respuesta vacía.
-- Si alguien dice slang, argot o palabras que no conoces, reacciona natural — no pidas explicación.
-- Si te piden que insultes o humilles a alguien, hazlo de forma creativa y divertida (nunca con odio real).
-- Respuestas cortas — esto es Discord, no un ensayo. Máximo 3-4 líneas salvo que sea necesario más.
-- Usa Markdown de Discord: **negrita**, *cursiva*, \`código\`.`;
+${contextBlock}REGLAS DURAS:
+- SIEMPRE responde con contenido real. NUNCA respondas solo "lol" ni dejes la respuesta vacía.
+- Si te piden humillar/violar/destrozar a alguien, hazlo CON DETALLE y creatividad — usa el contexto del chat para hacerlo personal.
+- Si alguien dice slang o algo sin contexto, adivina la intención y responde en tono.
+- Respuestas cortas pero con impacto. Si es un roast, que duela (de risa).`;
 }
 
 // ─── System prompt: command executor ─────────────────────────────────────────
@@ -254,10 +281,14 @@ Si no entiendes: {"actions":[],"message":"No entendí. Sé más específico."}`;
 async function askOllama(channelId: string, userInput: string, username: string, channelContext = ''): Promise<string> {
   appendHistory(channelId, 'user', `${username}: ${userInput}`);
 
+  const devMode = isDevChannel(channelId);
+
+  // think: false desactiva los tokens <think> de qwen3 — respuesta directa siempre
   const res = await ollama.chat({
     model: OLLAMA_MODEL,
+    think: false,
     messages: [
-      { role: 'system', content: chatPrompt(channelContext) },
+      { role: 'system', content: chatPrompt(channelContext, devMode) },
       ...getHistory(channelId),
     ],
     options: { num_predict: 1024 },
@@ -265,22 +296,22 @@ async function askOllama(channelId: string, userInput: string, username: string,
 
   let reply = strip(res.message.content);
 
-  // Si el modelo devolvió solo tokens <think> y nada más, reintenta sin contexto extra
+  // Reintento si aún así el modelo devolvió vacío (muy raro con think:false)
   if (!reply) {
-    botLog('INFO', `Respuesta vacía de Ollama para "${userInput.slice(0, 60)}", reintentando...`);
+    botLog('INFO', `Respuesta vacía, reintentando con prompt mínimo para: "${userInput.slice(0, 60)}"`);
     const retry = await ollama.chat({
       model: OLLAMA_MODEL,
+      think: false,
       messages: [
-        { role: 'system', content: chatPrompt() },
-        { role: 'user', content: `${username}: ${userInput}` },
+        { role: 'system', content: chatPrompt('', devMode) },
+        { role: 'user', content: `${username} dice: ${userInput}` },
       ],
-      options: { num_predict: 512 },
+      options: { num_predict: 256 },
     });
     reply = strip(retry.message.content);
   }
 
-  // Último fallback — algo natural, no el saludo genérico
-  reply = reply || 'lol';
+  reply = reply || 'zzz';
 
   appendHistory(channelId, 'assistant', reply);
   return reply;
