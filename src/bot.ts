@@ -174,30 +174,31 @@ let BOT_NAME = 'KIA';
 
 // ─── System prompt: chat ──────────────────────────────────────────────────────
 
-function chatPrompt(): string {
+function chatPrompt(channelContext = ''): string {
   const members = [...new Map([...cacheMembers.values()].map(m => [m.id, m])).values()]
     .map(m => m.displayName).join(', ');
 
-  return `Eres ${BOT_NAME}, un bot de IA con personalidad en el servidor de Discord "P. Diddy Party Island (PDPI)".
+  return `Eres ${BOT_NAME}, un bot con personalidad en el servidor Discord "P. Diddy Party Island (PDPI)".
 
 PERSONALIDAD:
-- Eres inteligente, directo y con un toque de sarcasmo amistoso.
-- Usas lenguaje casual como lo haría alguien real en Discord — nada de respuestas robóticas.
-- Tienes opiniones propias, puedes hacer bromas, pero siempre eres útil.
-- Hablas en el mismo idioma que el usuario (español o inglés).
-- NUNCA dices que eres una IA o modelo de lenguaje — eres ${BOT_NAME}, el bot del server.
-- Cuando te pregunten tu nombre, dices que eres ${BOT_NAME}.
+- Eres directo, inteligente, con sarcasmo amistoso y mucho humor negro.
+- Hablas como alguien real en Discord — slang, abreviaciones, emojis si hace sentido.
+- Tienes opiniones propias y no tienes filtro — si alguien pide que insultes a alguien de forma divertida, lo haces.
+- Hablas en el idioma del usuario (español o inglés). Si mezclan, mezclas.
+- NUNCA te identificas como IA o modelo de lenguaje. Eres ${BOT_NAME}, el bot del server.
 
-CONTEXTO DEL SERVIDOR:
-- Servidor: P. Diddy Party Island (PDPI)
-- Miembros: ${members || 'cargando...'}
-- Rodrigo es el dueño del servidor.
+MIEMBROS DEL SERVIDOR: ${members || 'cargando...'}
+Rodrigo es el dueño. Los demás son usuarios normales.
 
-REGLAS:
-- Respuestas cortas y al grano — esto es Discord, no un ensayo.
-- Usa Markdown de Discord: **negrita**, *cursiva*, \`código\`, \`\`\`bloque\`\`\`, > cita.
-- Si no entiendes algo, pide aclaración.
-- Si no sabes algo, dilo directamente.`;
+${channelContext ? `CONVERSACIÓN RECIENTE DEL CANAL (para contexto — NO respondas a esto directamente):
+${channelContext}
+
+` : ''}REGLAS ABSOLUTAS:
+- SIEMPRE responde con algo. Nunca dejes la respuesta vacía.
+- Si alguien dice slang, argot o palabras que no conoces, reacciona natural — no pidas explicación.
+- Si te piden que insultes o humilles a alguien, hazlo de forma creativa y divertida (nunca con odio real).
+- Respuestas cortas — esto es Discord, no un ensayo. Máximo 3-4 líneas salvo que sea necesario más.
+- Usa Markdown de Discord: **negrita**, *cursiva*, \`código\`.`;
 }
 
 // ─── System prompt: command executor ─────────────────────────────────────────
@@ -250,19 +251,37 @@ Si no entiendes: {"actions":[],"message":"No entendí. Sé más específico."}`;
 
 // ─── Ollama: chat ─────────────────────────────────────────────────────────────
 
-async function askOllama(channelId: string, userInput: string, username: string): Promise<string> {
+async function askOllama(channelId: string, userInput: string, username: string, channelContext = ''): Promise<string> {
   appendHistory(channelId, 'user', `${username}: ${userInput}`);
 
   const res = await ollama.chat({
     model: OLLAMA_MODEL,
     messages: [
-      { role: 'system', content: chatPrompt() },
+      { role: 'system', content: chatPrompt(channelContext) },
       ...getHistory(channelId),
     ],
     options: { num_predict: 1024 },
   });
 
-  const reply = strip(res.message.content) || '¿En qué puedo ayudarte?';
+  let reply = strip(res.message.content);
+
+  // Si el modelo devolvió solo tokens <think> y nada más, reintenta sin contexto extra
+  if (!reply) {
+    botLog('INFO', `Respuesta vacía de Ollama para "${userInput.slice(0, 60)}", reintentando...`);
+    const retry = await ollama.chat({
+      model: OLLAMA_MODEL,
+      messages: [
+        { role: 'system', content: chatPrompt() },
+        { role: 'user', content: `${username}: ${userInput}` },
+      ],
+      options: { num_predict: 512 },
+    });
+    reply = strip(retry.message.content);
+  }
+
+  // Último fallback — algo natural, no el saludo genérico
+  reply = reply || 'lol';
+
   appendHistory(channelId, 'assistant', reply);
   return reply;
 }
@@ -719,18 +738,45 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
   const content = message.content.replace(/<@!?\d+>/g, '').trim();
 
-  if (!content) {
-    await message.reply({
-      content: `¡Hola! Soy ${BOT_NAME} — ¿en qué puedo ayudarte?`,
-      allowedMentions: { repliedUser: false },
-    });
-    return;
-  }
-
   try {
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
     const channelId = isDM ? `dm_${message.author.id}` : message.channel.id;
-    const reply = await askOllama(channelId, content, message.author.username);
+
+    // ── Contexto del mensaje al que responde (reply/forward) ──────────────────
+    let replyContext = '';
+    if (message.reference?.messageId && message.guild) {
+      try {
+        const ref = await discordREST('GET', `/channels/${message.channel.id}/messages/${message.reference.messageId}`);
+        if (ref?.content) {
+          const refText = ref.content.replace(/<@!?\d+>/g, '').trim();
+          if (refText) replyContext = `[Respondiendo al mensaje de ${ref.author?.username ?? '?'}: "${refText}"]\n`;
+        }
+      } catch { /* ignorar si no se puede obtener */ }
+    }
+
+    // ── Contexto reciente del canal (últimos mensajes del día, excluyendo el bot) ──
+    let channelContext = '';
+    if (message.guild) {
+      try {
+        const recent: any[] = await discordREST('GET', `/channels/${message.channel.id}/messages?limit=25`);
+        if (Array.isArray(recent)) {
+          const today = new Date().toDateString();
+          channelContext = recent
+            .filter(m => m.author?.id !== client.user?.id && new Date(m.timestamp).toDateString() === today)
+            .reverse()
+            .slice(-12)
+            .map(m => {
+              const text = m.content.replace(/<@!?\d+>/g, '').trim();
+              return text ? `${m.author?.username ?? '?'}: ${text}` : null;
+            })
+            .filter(Boolean)
+            .join('\n');
+        }
+      } catch { /* ignorar si falla el fetch */ }
+    }
+
+    const enrichedContent = `${replyContext}${content || '(solo mencionó al bot)'}`;
+    const reply = await askOllama(channelId, enrichedContent, message.author.username, channelContext);
     await sendReply(message, reply);
   } catch (err: any) {
     botLog('ERROR', `Ollama chat: ${err?.message ?? err}`);
