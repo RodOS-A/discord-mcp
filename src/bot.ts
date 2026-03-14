@@ -404,7 +404,8 @@ function fmtDuration(sec: number): string {
 async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
   try {
     // Spotify URL → extraer título → buscar en YouTube
-    if (play.sp_validate(query) !== false) {
+    const spType = play.sp_validate(query);
+    if (spType !== false && spType !== 'search') {
       const sp = await play.spotify(query) as any;
       if (sp?.type === 'track') query = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? query}`;
     }
