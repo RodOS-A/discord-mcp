@@ -4,12 +4,27 @@ import {
   AudioPlayerStatus, type VoiceConnection, type AudioPlayer,
 } from '@discordjs/voice';
 import play from 'play-dl';
+import ytdl from '@distube/ytdl-core';
 import { Ollama } from 'ollama';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+// ─── Logger ───────────────────────────────────────────────────────────────────
+
+const LOG_FILE = path.join(process.cwd(), 'logs', 'bot.md');
+
+function botLog(level: 'INFO' | 'CMD' | 'ERROR' | 'MUSIC', msg: string): void {
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const line = `[${ts}] [${level}] ${msg}\n`;
+  process.stdout.write(line);
+  try {
+    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+    fs.appendFileSync(LOG_FILE, line, 'utf-8');
+  } catch { /* no interrumpir el bot si el log falla */ }
+}
 
 const BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN!;
 const GUILD_ID     = process.env.DISCORD_GUILD_ID!;
@@ -444,8 +459,8 @@ async function resolveTrack(query: string, requestedBy: string): Promise<Track |
       duration: fmtDuration(valid.durationInSec ?? 0),
       requestedBy,
     };
-  } catch (err) {
-    console.error('resolveTrack error:', err);
+  } catch (err: any) {
+    botLog('ERROR', `resolveTrack("${query}"): ${err?.message ?? err}`);
     return null;
   }
 }
@@ -465,10 +480,16 @@ function nowPlayingEmbed(track: Track, queued = false) {
 }
 
 async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
-  const stream = await play.stream(track.url);
-  const resource = createAudioResource(stream.stream, { inputType: stream.type as any });
+  // @distube/ytdl-core es más estable que play.stream() con la API actual de YouTube
+  const stream = ytdl(track.url, {
+    filter: 'audioonly',
+    quality: 'highestaudio',
+    highWaterMark: 1 << 25, // 32MB buffer para evitar cortes
+  });
+  const resource = createAudioResource(stream);
   gp.player.play(resource);
   gp.current = track;
+  botLog('MUSIC', `Reproduciendo: "${track.title}" (${track.url}) pedido por ${track.requestedBy}`);
   await discordREST('POST', `/channels/${gp.textChannelId}/messages`,
     { embeds: [nowPlayingEmbed(track)] });
 }
@@ -636,7 +657,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     const reply = await askOllama(channelId, content, message.author.username);
     await sendReply(message, reply);
   } catch (err: any) {
-    console.error('Ollama error:', err?.message ?? err);
+    botLog('ERROR', `Ollama chat: ${err?.message ?? err}`);
     await message.reply({
       content: '❌ Error al procesar. ¿Está Ollama corriendo?',
       allowedMentions: { repliedUser: false },
@@ -664,13 +685,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       const query = interaction.options.getString('query', true);
+      botLog('CMD', `/music query="${query}" usuario=${interaction.user.username} canal=${voiceChannel.name ?? voiceChannel.id}`);
       let track: Track | null;
       try {
         track = await resolveTrack(query, interaction.user.username);
-      } catch {
+      } catch (err: any) {
+        botLog('ERROR', `/music resolveTrack falló: ${err?.message ?? err}`);
         return void interaction.editReply('❌ Error buscando el track. Intenta con una URL de YouTube.');
       }
-      if (!track) return void interaction.editReply('❌ No encontré nada con esa búsqueda.');
+      if (!track) {
+        botLog('ERROR', `/music sin resultados para query="${query}"`);
+        return void interaction.editReply('❌ No encontré nada con esa búsqueda.');
+      }
 
       let gp = players.get(guildId);
       if (!gp) {
@@ -681,14 +707,15 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
         const player = createAudioPlayer();
         connection.subscribe(player);
-        player.on(AudioPlayerStatus.Idle, () => { advanceQueue(guildId).catch(console.error); });
-        player.on('error', (err) => { console.error('Player error:', err); advanceQueue(guildId).catch(console.error); });
+        player.on(AudioPlayerStatus.Idle, () => { advanceQueue(guildId).catch((e: any) => botLog('ERROR', `advanceQueue: ${e?.message}`)); });
+        player.on('error', (err) => { botLog('ERROR', `AudioPlayer: ${err?.message ?? err}`); advanceQueue(guildId).catch(() => {}); });
         gp = { connection, player, queue: [], textChannelId: interaction.channelId };
         players.set(guildId, gp);
       }
 
       if (gp.current) {
         gp.queue.push(track);
+        botLog('MUSIC', `Añadido a cola: "${track.title}"`);
         return void interaction.editReply({ embeds: [nowPlayingEmbed(track, true)] });
       }
 
@@ -696,7 +723,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await playTrack(gp, track);
         return void interaction.editReply({ content: '▶️ Iniciando reproducción...', embeds: [] });
       } catch (err: any) {
-        console.error('playTrack error:', err);
+        botLog('ERROR', `playTrack("${track.title}", ${track.url}): ${err?.message ?? err}`);
         players.delete(guildId);
         gp.connection.destroy();
         return void interaction.editReply('❌ Error al reproducir. Intenta con otra URL.');
