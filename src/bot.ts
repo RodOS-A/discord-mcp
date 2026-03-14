@@ -8,35 +8,15 @@ import { spawn } from 'child_process';
 import { Ollama } from 'ollama';
 import fs from 'fs';
 import path from 'path';
-import dotenv from 'dotenv';
 
-dotenv.config();
-
-// ─── Logger ───────────────────────────────────────────────────────────────────
-
-const LOG_FILE = path.join(process.cwd(), 'logs', 'bot.md');
-
-function botLog(level: 'INFO' | 'CMD' | 'ERROR' | 'MUSIC' | 'CLAUDE', msg: string): void {
-  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const line = `[${ts}] [${level}] ${msg}\n`;
-  process.stdout.write(line);
-  try {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
-    fs.appendFileSync(LOG_FILE, line, 'utf-8');
-  } catch { /* no interrumpir el bot si el log falla */ }
-}
-
-const BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN!;
-const GUILD_ID     = process.env.DISCORD_GUILD_ID!;
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen3:4b';
-const OLLAMA_HOST  = process.env.OLLAMA_HOST  ?? 'http://localhost:11434';
-
-if (!BOT_TOKEN) throw new Error('Missing DISCORD_BOT_TOKEN');
-if (!GUILD_ID)  throw new Error('Missing DISCORD_GUILD_ID');
-
-const DEV_CATEGORY_ID = '1482437015562752093';
-const RODRIGO_ID      = '998386333896687756';
-const BITS_FULL       = '68608'; // VIEW + SEND + READ_HISTORY
+import {
+  BOT_TOKEN, GUILD_ID, RODRIGO_ID, DEV_CATEGORY_ID, BITS_FULL,
+  OLLAMA_MODEL, OLLAMA_HOST, botLog, discordREST,
+} from './config.js';
+import {
+  initJarvis, handleClaudeCodeMessage, getPcSlashCommands, handlePcCommand,
+  getClaudeCodeChannelId,
+} from './jarvis.js';
 
 // ─── Clients ──────────────────────────────────────────────────────────────────
 
@@ -52,26 +32,10 @@ const client = new Client({
 });
 
 // Ollama con timeout extendido a 3 min — undici por defecto tiene 30s de headers timeout
-// lo cual es insuficiente cuando qwen3:4b está cargando o bajo carga
 const ollamaFetch: typeof globalThis.fetch = (input, init) =>
   globalThis.fetch(input, { ...(init as any), signal: AbortSignal.timeout(180_000) });
 
 const ollama = new Ollama({ host: OLLAMA_HOST, fetch: ollamaFetch as any });
-
-// ─── Discord REST helper ──────────────────────────────────────────────────────
-
-async function discordREST(method: string, endpoint: string, body?: unknown): Promise<any> {
-  const res = await fetch(`https://discord.com/api/v10${endpoint}`, {
-    method,
-    headers: {
-      'Authorization': `Bot ${BOT_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
-    ...(body !== undefined && { body: JSON.stringify(body) }),
-  });
-  if (res.status === 204) return { success: true };
-  return res.json();
-}
 
 // ─── Guild cache (members, roles, channels) ───────────────────────────────────
 
@@ -79,9 +43,9 @@ interface MemberInfo  { id: string; username: string; displayName: string }
 interface RoleInfo    { id: string; name: string; color: number }
 interface ChannelInfo { id: string; name: string; type: number; parent_id?: string }
 
-const cacheMembers  = new Map<string, MemberInfo>();   // username.lower -> info (also by displayName)
-const cacheRoles    = new Map<string, RoleInfo>();     // name.lower -> info
-const cacheChannels = new Map<string, ChannelInfo>();  // name.lower -> info
+const cacheMembers  = new Map<string, MemberInfo>();
+const cacheRoles    = new Map<string, RoleInfo>();
+const cacheChannels = new Map<string, ChannelInfo>();
 
 async function refreshGuildCache(): Promise<void> {
   try {
@@ -172,9 +136,8 @@ function strip(text: string): string {
 
 let BOT_NAME = 'KIA';
 
-// ─── System prompt: chat ──────────────────────────────────────────────────────
+// ─── System prompts ───────────────────────────────────────────────────────────
 
-// Detecta si un canal es de tipo DEV/técnico basándose en su parent_id o nombre
 function isDevChannel(channelId: string): boolean {
   const ch = [...cacheChannels.values()].find(c => c.id === channelId);
   if (!ch) return false;
@@ -227,8 +190,6 @@ ${contextBlock}REGLAS DURAS:
 - Si alguien dice slang o algo sin contexto, adivina la intención y responde en tono.
 - Respuestas cortas pero con impacto. Si es un roast, que duela (de risa).`;
 }
-
-// ─── System prompt: command executor ─────────────────────────────────────────
 
 function commandPrompt(): string {
   const members = [...new Map([...cacheMembers.values()].map(m => [m.id, m])).values()]
@@ -283,7 +244,6 @@ async function askOllama(channelId: string, userInput: string, username: string,
 
   const devMode = isDevChannel(channelId);
 
-  // think: false desactiva los tokens <think> de qwen3 — respuesta directa siempre
   const res = await ollama.chat({
     model: OLLAMA_MODEL,
     think: false,
@@ -296,9 +256,8 @@ async function askOllama(channelId: string, userInput: string, username: string,
 
   let reply = strip(res.message.content);
 
-  // Reintento si aún así el modelo devolvió vacío (muy raro con think:false)
   if (!reply) {
-    botLog('INFO', `Respuesta vacía, reintentando con prompt mínimo para: "${userInput.slice(0, 60)}"`);
+    botLog('INFO', `Respuesta vacía, reintentando para: "${userInput.slice(0, 60)}"`);
     const retry = await ollama.chat({
       model: OLLAMA_MODEL,
       think: false,
@@ -312,7 +271,6 @@ async function askOllama(channelId: string, userInput: string, username: string,
   }
 
   reply = reply || 'zzz';
-
   appendHistory(channelId, 'assistant', reply);
   return reply;
 }
@@ -371,8 +329,7 @@ async function executeActions(actions: any[]): Promise<string[]> {
           break;
 
         case 'ban_member':
-          await discordREST('PUT', `/guilds/${GUILD_ID}/bans/${a.user_id}`,
-            { delete_message_seconds: 0 });
+          await discordREST('PUT', `/guilds/${GUILD_ID}/bans/${a.user_id}`, { delete_message_seconds: 0 });
           results.push(`✅ Usuario baneado${a.reason ? ` — ${a.reason}` : ''}`);
           break;
 
@@ -427,14 +384,12 @@ async function executeActions(actions: any[]): Promise<string[]> {
           break;
 
         case 'create_category':
-          await discordREST('POST', `/guilds/${GUILD_ID}/channels`,
-            { name: a.name, type: 4 });
+          await discordREST('POST', `/guilds/${GUILD_ID}/channels`, { name: a.name, type: 4 });
           results.push(`✅ Categoría **${a.name}** creada`);
           break;
 
         case 'send_message':
-          await discordREST('POST', `/channels/${a.channel_id}/messages`,
-            { content: a.content });
+          await discordREST('POST', `/channels/${a.channel_id}/messages`, { content: a.content });
           results.push(`✅ Mensaje enviado`);
           break;
 
@@ -477,15 +432,21 @@ function fmtDuration(sec: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// Búsqueda via yt-dlp (reemplaza play.search que está roto con la API actual de YouTube)
+const YTDLP_BIN = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp.exe');
+
+function isYtdlpNoise(msg: string): boolean {
+  return msg.includes('Broken pipe')
+    || msg.includes('unable to write data')
+    || msg.includes('No supported JavaScript runtime')
+    || msg.includes('Invalid argument');
+}
+
 async function ytdlpSearch(searchQuery: string): Promise<Track | null> {
   return new Promise((resolve) => {
     const proc = spawn(YTDLP_BIN, [
       `ytsearch1:${searchQuery}`,
       '--print', '%(webpage_url)s\t%(title)s\t%(duration)s\t%(thumbnail)s',
-      '--no-download',
-      '--no-warnings',
-      '--js-runtimes', 'node',
+      '--no-download', '--no-warnings', '--js-runtimes', 'node',
     ]);
     let out = '';
     proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
@@ -505,15 +466,12 @@ async function ytdlpSearch(searchQuery: string): Promise<Track | null> {
 
 async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
   try {
-    // 1. Spotify URL → oEmbed API (sin auth, sin depender de YouTube search) → buscar en YouTube
     if (query.includes('open.spotify.com') || query.startsWith('spotify:')) {
       try {
-        // Normalizar URL: quitar ?si= y /intl-XX/ para que oEmbed la acepte
         const cleanUrl = query.replace(/\/intl-[a-z]{2}\//, '/').replace(/\?.*$/, '');
         const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`);
         if (oembedRes.ok) {
           const data = await oembedRes.json() as any;
-          // title viene como "Track Name" o "Artist Name - Track Name"
           const searchText: string = data.title ?? '';
           if (searchText) {
             botLog('INFO', `Spotify oEmbed → buscando: "${searchText}"`);
@@ -521,21 +479,17 @@ async function resolveTrack(query: string, requestedBy: string): Promise<Track |
             if (t) return { ...t, requestedBy };
           }
         }
-      } catch (e: any) {
-        botLog('ERROR', `Spotify oEmbed: ${e?.message}`);
-      }
+      } catch (e: any) { botLog('ERROR', `Spotify oEmbed: ${e?.message}`); }
       return null;
     }
 
-    // 2. YouTube URL → limpiar params extra (&list=, &pp=, etc.) y quedarse solo con ?v=ID
     if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
       try {
         const u = new URL(query);
         const vid = u.searchParams.get('v') ?? u.pathname.replace('/', '');
         if (vid) query = `https://www.youtube.com/watch?v=${vid}`;
-      } catch { /* URL mal formada, usar tal cual */ }
+      } catch { }
 
-      // Obtener info del video via yt-dlp para título y thumbnail
       const infoProc = await new Promise<Track | null>((resolve) => {
         const p = spawn(YTDLP_BIN, [
           query,
@@ -559,7 +513,6 @@ async function resolveTrack(query: string, requestedBy: string): Promise<Track |
       return infoProc;
     }
 
-    // 3. Búsqueda de texto via yt-dlp (play.search() está roto con la API actual de YouTube)
     const t = await ytdlpSearch(query);
     if (!t) return null;
     return { ...t, requestedBy };
@@ -584,27 +537,10 @@ function nowPlayingEmbed(track: Track, queued = false) {
   };
 }
 
-// Ruta al binario yt-dlp descargado por youtube-dl-exec
-const YTDLP_BIN = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp.exe');
-
-// Mensajes de stderr de yt-dlp que son ruido esperado, no errores reales
-function isYtdlpNoise(msg: string): boolean {
-  return msg.includes('Broken pipe')
-    || msg.includes('unable to write data')
-    || msg.includes('No supported JavaScript runtime')
-    || msg.includes('Invalid argument');
-}
-
 async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
-  // yt-dlp es el único que se mantiene actualizado contra los cambios de YouTube
-  // Pipe: yt-dlp stdout → createAudioResource → @discordjs/voice → discord opus
   const proc = spawn(YTDLP_BIN, [
     '-f', 'bestaudio[ext=webm]/bestaudio/best',
-    '--no-playlist',
-    '--js-runtimes', 'node',
-    '-o', '-',
-    '-q',
-    track.url,
+    '--no-playlist', '--js-runtimes', 'node', '-o', '-', '-q', track.url,
   ]);
   proc.stderr.on('data', (d: Buffer) => {
     const msg = d.toString().trim();
@@ -615,8 +551,7 @@ async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
   gp.player.play(resource);
   gp.current = track;
   botLog('MUSIC', `Reproduciendo: "${track.title}" (${track.url}) pedido por ${track.requestedBy}`);
-  await discordREST('POST', `/channels/${gp.textChannelId}/messages`,
-    { embeds: [nowPlayingEmbed(track)] });
+  await discordREST('POST', `/channels/${gp.textChannelId}/messages`, { embeds: [nowPlayingEmbed(track)] });
 }
 
 async function advanceQueue(guildId: string): Promise<void> {
@@ -627,7 +562,6 @@ async function advanceQueue(guildId: string): Promise<void> {
     await playTrack(gp, next);
   } else {
     gp.current = undefined;
-    // Desconectar tras 3 min de inactividad si no hay nada en cola
     setTimeout(() => {
       const p = players.get(guildId);
       if (p && !p.current && p.queue.length === 0) {
@@ -666,58 +600,7 @@ async function sendReply(message: Message, text: string): Promise<void> {
 
 // ─── Setup #create channel ────────────────────────────────────────────────────
 
-let CREATE_CHANNEL_ID     = '';
-let MYPC_CATEGORY_ID      = '';
-let CLAUDECODE_CHANNEL_ID = '';
-let LOGSPC_CHANNEL_ID     = '';
-
-// Palabras que indican acciones potencialmente destructivas — piden confirmación antes de ejecutar
-const DANGER_WORDS = ['delete', 'remove', 'rm ', 'drop', 'uninstall', 'format',
-                      'elimina', 'borra ', 'borrar', 'eliminar', 'desinstala', 'truncar', 'truncate'];
-
-function isDangerousPrompt(text: string): boolean {
-  const lower = text.toLowerCase();
-  return DANGER_WORDS.some(k => lower.includes(k));
-}
-
-// Canal IDs donde hay confirmación pendiente — evita que "si"/"no" se procesen como prompts
-const pendingConfirmation = new Set<string>();
-
-async function logToLogspc(content: string): Promise<void> {
-  if (!LOGSPC_CHANNEL_ID) return;
-  try {
-    await discordREST('POST', `/channels/${LOGSPC_CHANNEL_ID}/messages`,
-      { content: content.slice(0, 2000) });
-  } catch { /* non-blocking */ }
-}
-
-async function runClaudeCode(prompt: string): Promise<string> {
-  return new Promise((resolve) => {
-    botLog('CLAUDE', `Ejecutando: "${prompt.slice(0, 100)}"`);
-    const proc = spawn(
-      'claude',
-      ['-p', prompt, '--dangerously-skip-permissions'],
-      { cwd: process.cwd(), shell: true },
-    );
-    let out = '';
-    const timer = setTimeout(() => {
-      try { proc.kill(); } catch {}
-      resolve('⏰ Timeout: Claude Code tardó más de 5 minutos.');
-    }, 5 * 60 * 1000);
-    proc.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
-    proc.stderr?.on('data', (d: Buffer) => { out += d.toString(); });
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      botLog('CLAUDE', `Proceso terminó con código ${code}`);
-      resolve(out.trim() || '(sin output)');
-    });
-    proc.on('error', (e) => {
-      clearTimeout(timer);
-      botLog('ERROR', `runClaudeCode spawn: ${e.message}`);
-      resolve(`❌ No se pudo lanzar Claude Code: ${e.message}\n(¿está \`claude\` en el PATH?)`);
-    });
-  });
-}
+let CREATE_CHANNEL_ID = '';
 
 async function setupCreateChannel(botId: string): Promise<void> {
   const existing = [...cacheChannels.values()].find(
@@ -736,68 +619,14 @@ async function setupCreateChannel(botId: string): Promise<void> {
     parent_id: DEV_CATEGORY_ID,
     topic: 'Canal de comandos — escribe cualquier orden en lenguaje natural.',
     permission_overwrites: [
-      { id: GUILD_ID,    type: 0, allow: '0',        deny: BITS_FULL },
-      { id: RODRIGO_ID,  type: 1, allow: BITS_FULL,  deny: '0' },
-      { id: botId,       type: 1, allow: BITS_FULL,  deny: '0' },
+      { id: GUILD_ID,   type: 0, allow: '0',       deny: BITS_FULL },
+      { id: RODRIGO_ID, type: 1, allow: BITS_FULL, deny: '0' },
+      { id: botId,      type: 1, allow: BITS_FULL, deny: '0' },
     ],
   });
 
   CREATE_CHANNEL_ID = ch.id;
   console.log(`   #create: ${CREATE_CHANNEL_ID} (creado)`);
-  await refreshGuildCache();
-}
-
-async function setupMyPcChannels(botId: string): Promise<void> {
-  // 1. Buscar o crear categoría mypc
-  const mypcCat = [...cacheChannels.values()].find(c => c.type === 4 && c.name.toLowerCase() === 'mypc');
-  if (mypcCat) {
-    MYPC_CATEGORY_ID = mypcCat.id;
-  } else {
-    const cat = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, { name: 'mypc', type: 4 });
-    MYPC_CATEGORY_ID = cat.id;
-    await refreshGuildCache();
-  }
-
-  // 2. Buscar o crear #claudecode — solo Rodrigo y el bot
-  const ccChan = [...cacheChannels.values()].find(c => c.name === 'claudecode' && c.parent_id === MYPC_CATEGORY_ID);
-  if (ccChan) {
-    CLAUDECODE_CHANNEL_ID = ccChan.id;
-  } else {
-    const ch = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, {
-      name: 'claudecode',
-      type: 0,
-      parent_id: MYPC_CATEGORY_ID,
-      topic: 'Escribe un prompt y Claude Code lo ejecuta en tu PC.',
-      permission_overwrites: [
-        { id: GUILD_ID,   type: 0, allow: '0',       deny: BITS_FULL },
-        { id: RODRIGO_ID, type: 1, allow: BITS_FULL, deny: '0' },
-        { id: botId,      type: 1, allow: BITS_FULL, deny: '0' },
-      ],
-    });
-    CLAUDECODE_CHANNEL_ID = ch.id;
-  }
-
-  // 3. Buscar o crear #logspc — todos pueden leer, solo bot y Rodrigo pueden escribir
-  const VIEW_READ = '66560'; // VIEW_CHANNEL(1024) + READ_MESSAGE_HISTORY(65536)
-  const logsChan = [...cacheChannels.values()].find(c => c.name === 'logspc' && c.parent_id === MYPC_CATEGORY_ID);
-  if (logsChan) {
-    LOGSPC_CHANNEL_ID = logsChan.id;
-  } else {
-    const ch = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, {
-      name: 'logspc',
-      type: 0,
-      parent_id: MYPC_CATEGORY_ID,
-      topic: 'Log automático de todas las acciones ejecutadas por Claude Code.',
-      permission_overwrites: [
-        { id: GUILD_ID,   type: 0, allow: VIEW_READ, deny: '2048' }, // ver pero no escribir
-        { id: botId,      type: 1, allow: BITS_FULL, deny: '0' },
-        { id: RODRIGO_ID, type: 1, allow: BITS_FULL, deny: '0' },
-      ],
-    });
-    LOGSPC_CHANNEL_ID = ch.id;
-  }
-
-  console.log(`   mypc=${MYPC_CATEGORY_ID}  claudecode=${CLAUDECODE_CHANNEL_ID}  logspc=${LOGSPC_CHANNEL_ID}`);
   await refreshGuildCache();
 }
 
@@ -810,11 +639,10 @@ client.once(Events.ClientReady, async (c) => {
 
   await refreshGuildCache();
   await setupCreateChannel(c.user.id);
-  await setupMyPcChannels(c.user.id);
+  await initJarvis(c.user.id, cacheChannels, refreshGuildCache);
 
   console.log(`   Memoria: ${history.size} canales guardados`);
 
-  // Registrar slash commands de música
   const slashCommands = [
     {
       name: 'music',
@@ -828,7 +656,9 @@ client.once(Events.ClientReady, async (c) => {
     { name: 'skip',  description: 'Salta a la siguiente canción en la cola' },
     { name: 'queue', description: 'Muestra la cola de reproducción actual' },
     { name: 'help',  description: 'Muestra todos los comandos disponibles del bot' },
+    ...getPcSlashCommands(),
   ];
+
   const registered = await discordREST(
     'PUT',
     `/applications/${c.user.id}/guilds/${GUILD_ID}/commands`,
@@ -836,7 +666,6 @@ client.once(Events.ClientReady, async (c) => {
   );
   console.log(`   Slash commands registrados: ${Array.isArray(registered) ? registered.length : '?'}`);
 
-  // Refresh cache every 5 min
   setInterval(refreshGuildCache, 5 * 60 * 1000);
 });
 
@@ -847,65 +676,19 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
   const isMentioned      = client.user ? message.mentions.has(client.user) : false;
   const isDM             = !message.guild;
-  const isCreateChan     = !!CREATE_CHANNEL_ID     && message.channel.id === CREATE_CHANNEL_ID;
-  const isClaudeCodeChan = !!CLAUDECODE_CHANNEL_ID && message.channel.id === CLAUDECODE_CHANNEL_ID;
+  const isCreateChan     = !!CREATE_CHANNEL_ID          && message.channel.id === CREATE_CHANNEL_ID;
+  const isClaudeCodeChan = !!getClaudeCodeChannelId()   && message.channel.id === getClaudeCodeChannelId();
 
   if (!isMentioned && !isDM && !isCreateChan && !isClaudeCodeChan) return;
 
-  // ── #claudecode: bridge → Claude Code CLI ────────────────────────────────
+  // ── #claudecode → Jarvis (Claude Code bridge) ─────────────────────────────
   if (isClaudeCodeChan) {
-    // Solo Rodrigo puede enviar prompts
-    if (message.author.id !== RODRIGO_ID) return;
-
-    const prompt = message.content.trim();
-    if (!prompt) return;
-
-    // Ignorar si hay una confirmación pendiente (respuestas "si"/"no")
-    if (pendingConfirmation.has(message.channel.id)) return;
-
-    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
-
-    // Pre-check: confirmar acciones potencialmente peligrosas
-    if (isDangerousPrompt(prompt)) {
-      pendingConfirmation.add(message.channel.id);
-      try {
-        await message.reply({
-          content: `⚠️ **Acción potencialmente peligrosa detectada.**\nPrompt: \`${prompt.slice(0, 300)}\`\n\nResponde **si** para confirmar o **no** para cancelar *(60s)*`,
-          allowedMentions: { repliedUser: false },
-        });
-        const collected = await (message.channel as any).awaitMessages({
-          filter: (m: Message) =>
-            m.author.id === RODRIGO_ID &&
-            ['si', 'sí', 'no'].includes(m.content.toLowerCase().trim()),
-          max: 1,
-          time: 60_000,
-          errors: ['time'],
-        }).catch(() => null);
-
-        const resp = (collected as any)?.first()?.content?.toLowerCase()?.trim();
-        if (resp !== 'si' && resp !== 'sí') {
-          const reason = collected ? 'cancelado' : 'timeout (60s)';
-          await message.reply({ content: `❌ Acción ${reason}.`, allowedMentions: { repliedUser: false } });
-          await logToLogspc(`\`[${ts}]\` ❌ **CANCELADO** (${reason})\n> \`${prompt.slice(0, 300)}\``);
-          return;
-        }
-      } finally {
-        pendingConfirmation.delete(message.channel.id);
-      }
-    }
-
-    botLog('CLAUDE', `Prompt de Discord: "${prompt.slice(0, 100)}"`);
-    await logToLogspc(`\`[${ts}]\` 📥 **PROMPT**\n\`\`\`\n${prompt.slice(0, 800)}\n\`\`\``);
-
-    if ('sendTyping' in message.channel) await message.channel.sendTyping();
-    const result = await runClaudeCode(prompt);
-
-    await logToLogspc(`\`[${ts}]\` ✅ **RESULTADO**\n\`\`\`\n${result.slice(0, 1500)}\n\`\`\``);
-    await sendReply(message, result || '(sin output)');
+    await handleClaudeCodeMessage(message)
+      .catch((e: any) => botLog('ERROR', `handleClaudeCodeMessage: ${e?.message}`));
     return;
   }
 
-  // ── #create: execute Discord admin commands ───────────────────────────────
+  // ── #create → Discord admin command executor ──────────────────────────────
   if (isCreateChan) {
     try {
       if ('sendTyping' in message.channel) await message.channel.sendTyping();
@@ -920,7 +703,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     return;
   }
 
-  // ── Regular chat: @mention or DM ─────────────────────────────────────────
+  // ── Chat: @mention or DM ──────────────────────────────────────────────────
   if (isOnCooldown(message.author.id)) {
     await message.react('⏳').catch(() => {});
     return;
@@ -933,7 +716,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
     const channelId = isDM ? `dm_${message.author.id}` : message.channel.id;
 
-    // ── Contexto del mensaje al que responde (reply/forward) ──────────────────
+    // Contexto del mensaje al que responde (reply/forward)
     let replyContext = '';
     if (message.reference?.messageId && message.guild) {
       try {
@@ -942,10 +725,10 @@ client.on(Events.MessageCreate, async (message: Message) => {
           const refText = ref.content.replace(/<@!?\d+>/g, '').trim();
           if (refText) replyContext = `[Respondiendo al mensaje de ${ref.author?.username ?? '?'}: "${refText}"]\n`;
         }
-      } catch { /* ignorar si no se puede obtener */ }
+      } catch { }
     }
 
-    // ── Contexto reciente del canal (últimos mensajes del día, excluyendo el bot) ──
+    // Contexto reciente del canal (últimos mensajes del día)
     let channelContext = '';
     if (message.guild) {
       try {
@@ -963,7 +746,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
             .filter(Boolean)
             .join('\n');
         }
-      } catch { /* ignorar si falla el fetch */ }
+      } catch { }
     }
 
     const enrichedContent = `${replyContext}${content || '(solo mencionó al bot)'}`;
@@ -978,7 +761,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
   }
 });
 
-// ─── Event: Slash commands (music) ────────────────────────────────────────────
+// ─── Event: Slash commands ────────────────────────────────────────────────────
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand() || !interaction.guildId) return;
@@ -987,6 +770,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
   const guildId = interaction.guildId;
 
   switch (interaction.commandName) {
+
+    case 'pc': {
+      await handlePcCommand(interaction);
+      break;
+    }
 
     case 'music': {
       const member = interaction.member as GuildMember;
@@ -1056,7 +844,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     case 'skip': {
       const gp = players.get(guildId);
       if (!gp?.current) return void interaction.editReply('❌ No hay nada reproduciéndose.');
-      gp.player.stop(); // dispara Idle → advanceQueue
+      gp.player.stop();
       return void interaction.editReply('⏭️ Saltando...');
     }
 
@@ -1078,30 +866,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
           {
             name: '🎵 Música',
             value: [
-              '`/music <nombre/artista/URL>` — Reproduce en tu canal de voz. Acepta búsquedas de texto, URLs de YouTube y URLs de Spotify.',
-              '`/skip` — Salta a la siguiente canción en la cola.',
-              '`/queue` — Muestra qué se está reproduciendo y la cola pendiente.',
-              '`/stop` — Detiene la reproducción y desconecta el bot del canal de voz.',
+              '`/music <nombre/artista/URL>` — Reproduce en tu canal de voz. Acepta YouTube y Spotify.',
+              '`/skip` — Salta a la siguiente canción.',
+              '`/queue` — Muestra la cola de reproducción.',
+              '`/stop` — Detiene y desconecta el bot.',
             ].join('\n'),
           },
           {
             name: '🤖 Chat con IA',
             value: [
-              `\`@${BOT_NAME} <mensaje>\` — Habla con el bot en cualquier canal. Tiene memoria de conversación por canal.`,
-              '**DM directo** — También puedes escribirle por mensaje privado.',
+              `\`@${BOT_NAME} <mensaje>\` — Chat en cualquier canal con memoria de conversación.`,
+              '**DM directo** — También por mensaje privado.',
             ].join('\n'),
           },
           {
-            name: '⚙️ Administración (solo canal #create)',
+            name: '⚙️ Administración (#create)',
             value: [
-              'Escribe cualquier orden en lenguaje natural en **#create** y el bot la ejecuta:',
-              '`crea un rol llamado Admin de color rojo`',
-              '`banea a [usuario] por spam`',
-              '`crea un canal llamado general en la categoría DEV`',
-              '`dale el rol Mod a [usuario]`',
-              '`pon de nickname [nombre] a [usuario]`',
-              '',
-              'Acciones disponibles: crear/eliminar roles y canales, ban/kick/unban, timeout, asignar roles, cambiar nickname, crear categorías, enviar mensajes.',
+              'Órdenes en lenguaje natural en **#create**:',
+              '`crea un rol Admin de color rojo`, `banea a usuario`, `dale el rol Mod a alguien`',
+              'Acciones: roles, canales, ban/kick/timeout, nicknames, categorías, mensajes.',
+            ].join('\n'),
+          },
+          {
+            name: '🖥️ PC Remoto — JARVIS (solo Rodrigo)',
+            value: [
+              '`/pc status` — Estado del sistema (disco, RAM, uptime).',
+              '`/pc run <cmd>` — Ejecuta un comando shell.',
+              '`/pc file <path>` — Lee el contenido de un archivo.',
+              '**#claudecode** — Envía cualquier prompt a Jarvis (Claude Code) para ejecutar en el PC.',
             ].join('\n'),
           },
         ],
