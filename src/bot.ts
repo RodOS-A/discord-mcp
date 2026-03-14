@@ -416,49 +416,89 @@ function fmtDuration(sec: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// Búsqueda via yt-dlp (reemplaza play.search que está roto con la API actual de YouTube)
+async function ytdlpSearch(searchQuery: string): Promise<Track | null> {
+  return new Promise((resolve) => {
+    const proc = spawn(YTDLP_BIN, [
+      `ytsearch1:${searchQuery}`,
+      '--print', '%(webpage_url)s\t%(title)s\t%(duration)s\t%(thumbnail)s',
+      '--no-download',
+      '--no-warnings',
+      '--js-runtimes', 'node',
+    ]);
+    let out = '';
+    proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+    proc.stderr.on('data', (d: Buffer) => {
+      const msg = d.toString().trim();
+      if (msg && !msg.includes('Broken pipe')) botLog('ERROR', `ytdlpSearch stderr: ${msg}`);
+    });
+    proc.on('close', () => {
+      const line = out.trim().split('\n')[0] ?? '';
+      const [url, title, dur, thumbnail] = line.split('\t');
+      if (!url?.startsWith('http')) return resolve(null);
+      resolve({ url, title: title ?? url, duration: fmtDuration(parseInt(dur) || 0), thumbnail, requestedBy: '' });
+    });
+    proc.on('error', (e) => { botLog('ERROR', `ytdlpSearch spawn: ${e.message}`); resolve(null); });
+  });
+}
+
 async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
   try {
-    // Spotify URL → extraer título → buscar en YouTube
-    // Usamos includes() en lugar de sp_validate() que retorna 'search' para texto plano
+    // 1. Spotify URL → normalizar locale path → extraer nombre del track → buscar en YouTube
     if (query.includes('open.spotify.com') || query.startsWith('spotify:')) {
+      // Normalizar: /intl-es/track/ → /track/  (play-dl no reconoce paths con locale)
+      const normalized = query.replace(/\/intl-[a-z]{2}\//, '/').replace(/\?.*$/, '');
       try {
-        const sp = await play.spotify(query) as any;
-        if (sp?.type === 'track') query = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? query}`;
-      } catch {
-        // Si falla la resolución Spotify, igual buscamos el texto original en YouTube
-      }
+        const sp = await play.spotify(normalized) as any;
+        if (sp?.type === 'track') {
+          const searchText = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? ''}`.trim();
+          if (searchText && searchText !== '-') {
+            const t = await ytdlpSearch(searchText);
+            if (t) return { ...t, requestedBy };
+          }
+        }
+      } catch { /* falla silenciosa, caemos a búsqueda por texto si el track tiene título */ }
+      // Fallback: buscar el texto de la URL directamente (sin el ID de Spotify)
+      return null;
     }
 
-    // YouTube URL directa
-    if (play.yt_validate(query) === 'video') {
+    // 2. YouTube URL → limpiar params extra (&list=, &pp=, etc.) y quedarse solo con ?v=ID
+    if (query.includes('youtube.com/watch') || query.includes('youtu.be/')) {
       try {
-        const info = await play.video_info(query);
-        const v = info.video_details;
-        return {
-          url: query,
-          title: v.title ?? query,
-          thumbnail: v.thumbnails?.[0]?.url,
-          duration: fmtDuration(v.durationInSec ?? 0),
-          requestedBy,
-        };
-      } catch {
-        // Si falla video_info pero la URL parece válida, intentar stream directo
-        return { url: query, title: query, duration: '?:??', requestedBy };
-      }
+        const u = new URL(query);
+        const vid = u.searchParams.get('v') ?? u.pathname.replace('/', '');
+        if (vid) query = `https://www.youtube.com/watch?v=${vid}`;
+      } catch { /* URL mal formada, usar tal cual */ }
+
+      // Obtener info del video via yt-dlp para título y thumbnail
+      const infoProc = await new Promise<Track | null>((resolve) => {
+        const p = spawn(YTDLP_BIN, [
+          query,
+          '--print', '%(webpage_url)s\t%(title)s\t%(duration)s\t%(thumbnail)s',
+          '--no-download', '--no-warnings', '--js-runtimes', 'node',
+        ]);
+        let out = '';
+        p.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+        p.stderr.on('data', (d: Buffer) => {
+          const msg = d.toString().trim();
+          if (msg && !msg.includes('Broken pipe')) botLog('ERROR', `yt-dlp info stderr: ${msg}`);
+        });
+        p.on('close', () => {
+          const line = out.trim().split('\n')[0] ?? '';
+          const [url, title, dur, thumbnail] = line.split('\t');
+          if (!url?.startsWith('http')) return resolve({ url: query, title: query, duration: '?:??', requestedBy });
+          resolve({ url, title: title ?? query, duration: fmtDuration(parseInt(dur) || 0), thumbnail, requestedBy });
+        });
+        p.on('error', () => resolve({ url: query, title: query, duration: '?:??', requestedBy }));
+      });
+      return infoProc;
     }
 
-    // Búsqueda por texto — play-dl a veces devuelve resultados con url undefined
-    // pedimos más resultados y tomamos el primero con URL válida
-    const results = await play.search(query, { limit: 5, source: { youtube: 'video' } });
-    const valid = (results as any[]).find(r => typeof r?.url === 'string' && r.url.startsWith('http'));
-    if (!valid) return null;
-    return {
-      url: valid.url,
-      title: valid.title ?? query,
-      thumbnail: valid.thumbnails?.[0]?.url,
-      duration: fmtDuration(valid.durationInSec ?? 0),
-      requestedBy,
-    };
+    // 3. Búsqueda de texto via yt-dlp (play.search() está roto con la API actual de YouTube)
+    const t = await ytdlpSearch(query);
+    if (!t) return null;
+    return { ...t, requestedBy };
+
   } catch (err: any) {
     botLog('ERROR', `resolveTrack("${query}"): ${err?.message ?? err}`);
     return null;
@@ -488,13 +528,16 @@ async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
   const proc = spawn(YTDLP_BIN, [
     '-f', 'bestaudio[ext=webm]/bestaudio/best',
     '--no-playlist',
+    '--js-runtimes', 'node',
     '-o', '-',
     '-q',
     track.url,
   ]);
   proc.stderr.on('data', (d: Buffer) => {
     const msg = d.toString().trim();
-    if (msg) botLog('ERROR', `yt-dlp stderr: ${msg}`);
+    if (msg && !msg.includes('Broken pipe') && !msg.includes('No supported JavaScript runtime')) {
+      botLog('ERROR', `yt-dlp stderr: ${msg}`);
+    }
   });
   if (!proc.stdout) throw new Error('yt-dlp: no stdout');
   const resource = createAudioResource(proc.stdout);
