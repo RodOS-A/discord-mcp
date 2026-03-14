@@ -17,7 +17,9 @@ Usa la REST API de Discord a través de `@discordjs/rest` y se conecta via stdio
 - **Runtime:** Node.js (ESM)
 - **Lenguaje:** TypeScript
 - **MCP SDK:** `@modelcontextprotocol/sdk`
-- **Discord:** `@discordjs/rest` + `discord-api-types/v10`
+- **Discord REST:** `@discordjs/rest` + `discord-api-types/v10`
+- **Discord Gateway:** `discord.js` v14 (bot con websocket)
+- **IA:** `@anthropic-ai/sdk` → `claude-sonnet-4-6`
 - **Config:** `dotenv` → `.env` (nunca commiteado)
 
 ## Variables de entorno
@@ -25,6 +27,7 @@ Usa la REST API de Discord a través de `@discordjs/rest` y se conecta via stdio
 ```
 DISCORD_BOT_TOKEN=<bot token>
 DISCORD_GUILD_ID=<server id>
+ANTHROPIC_API_KEY=<anthropic api key>   # requerida para el bot Gateway
 ```
 
 Ver `.env.example` para referencia.
@@ -32,9 +35,11 @@ Ver `.env.example` para referencia.
 ## Comandos
 
 ```bash
-npm run build   # Compila TypeScript → build/
-npm run dev     # Compila y ejecuta
-npm start       # Ejecuta build/index.js directamente
+npm run build       # Compila TypeScript → build/
+npm start           # Ejecuta MCP server (para Claude Desktop)
+npm run start:bot   # Ejecuta bot Gateway (responde @menciones con Claude IA)
+npm run dev         # Compila y ejecuta MCP server
+npm run dev:bot     # Compila y ejecuta bot Gateway
 ```
 
 ## Configuración en Claude Desktop
@@ -77,10 +82,15 @@ npm start       # Ejecuta build/index.js directamente
 
 ```
 src/
-  index.ts     # Punto de entrada único: definición de tools + handlers
+  index.ts   # MCP server — 49 herramientas para gestión desde Claude Desktop
+  bot.ts     # Gateway bot — responde @menciones usando Claude API (claude-sonnet-4-6)
 build/
-  index.js     # Output compilado (gitignoreado)
+  index.js   # Output compilado (gitignoreado)
+  bot.js
 ```
+
+Los dos procesos son independientes. El MCP server (`index.ts`) usa stdio y no necesita Gateway.
+El bot Gateway (`bot.ts`) requiere `MESSAGE_CONTENT` intent habilitado en Discord Developer Portal.
 
 ## Convenciones
 
@@ -91,6 +101,15 @@ build/
 ---
 
 ## Changelog
+
+### v3.0.0 — 2026-03-14
+- Nuevo `src/bot.ts`: bot Gateway con discord.js v14
+- Responde a @menciones con IA real (claude-sonnet-4-6 via Anthropic API)
+- Responde a DMs directamente
+- Historial de conversación por canal (últimos 10 intercambios)
+- Cooldown de 3s por usuario
+- Mensajes largos divididos automáticamente (límite 2000 chars de Discord)
+- Nueva variable de entorno: `ANTHROPIC_API_KEY`
 
 ### v2.0.0 — 2026-03-14
 - Añadidas 22 herramientas nuevas: permisos de canal, embeds, DMs, edición de mensajes, reacciones, nickname, timeout, voz (mute/deafen/move/voice_state), update_server, emojis, stickers, eventos programados, stage instances
