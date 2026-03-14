@@ -51,7 +51,12 @@ const client = new Client({
   ],
 });
 
-const ollama = new Ollama({ host: OLLAMA_HOST });
+// Ollama con timeout extendido a 3 min — undici por defecto tiene 30s de headers timeout
+// lo cual es insuficiente cuando qwen3:4b está cargando o bajo carga
+const ollamaFetch: typeof globalThis.fetch = (input, init) =>
+  globalThis.fetch(input, { ...(init as any), signal: AbortSignal.timeout(180_000) });
+
+const ollama = new Ollama({ host: OLLAMA_HOST, fetch: ollamaFetch as any });
 
 // ─── Discord REST helper ──────────────────────────────────────────────────────
 
@@ -281,9 +286,15 @@ async function interpretCommand(input: string): Promise<{ actions: any[]; messag
       actions: Array.isArray(parsed.actions) ? parsed.actions : [],
       message: parsed.message ?? 'Hecho.',
     };
-  } catch (err) {
-    console.error('Command parse error:', err);
-    return { actions: [], message: 'Error al interpretar el comando.' };
+  } catch (err: any) {
+    const isTimeout = err?.code === 'UND_ERR_HEADERS_TIMEOUT' || err?.name === 'TimeoutError';
+    botLog('ERROR', `interpretCommand: ${err?.message ?? err}`);
+    return {
+      actions: [],
+      message: isTimeout
+        ? '⏳ Ollama tardó demasiado en responder. Espera un momento e intenta de nuevo.'
+        : 'Error al interpretar el comando.',
+    };
   }
 }
 
@@ -430,7 +441,7 @@ async function ytdlpSearch(searchQuery: string): Promise<Track | null> {
     proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => {
       const msg = d.toString().trim();
-      if (msg && !msg.includes('Broken pipe')) botLog('ERROR', `ytdlpSearch stderr: ${msg}`);
+      if (msg && !isYtdlpNoise(msg)) botLog('ERROR', `ytdlpSearch stderr: ${msg}`);
     });
     proc.on('close', () => {
       const line = out.trim().split('\n')[0] ?? '';
@@ -444,21 +455,25 @@ async function ytdlpSearch(searchQuery: string): Promise<Track | null> {
 
 async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
   try {
-    // 1. Spotify URL → normalizar locale path → extraer nombre del track → buscar en YouTube
+    // 1. Spotify URL → oEmbed API (sin auth, sin depender de YouTube search) → buscar en YouTube
     if (query.includes('open.spotify.com') || query.startsWith('spotify:')) {
-      // Normalizar: /intl-es/track/ → /track/  (play-dl no reconoce paths con locale)
-      const normalized = query.replace(/\/intl-[a-z]{2}\//, '/').replace(/\?.*$/, '');
       try {
-        const sp = await play.spotify(normalized) as any;
-        if (sp?.type === 'track') {
-          const searchText = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? ''}`.trim();
-          if (searchText && searchText !== '-') {
+        // Normalizar URL: quitar ?si= y /intl-XX/ para que oEmbed la acepte
+        const cleanUrl = query.replace(/\/intl-[a-z]{2}\//, '/').replace(/\?.*$/, '');
+        const oembedRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(cleanUrl)}`);
+        if (oembedRes.ok) {
+          const data = await oembedRes.json() as any;
+          // title viene como "Track Name" o "Artist Name - Track Name"
+          const searchText: string = data.title ?? '';
+          if (searchText) {
+            botLog('INFO', `Spotify oEmbed → buscando: "${searchText}"`);
             const t = await ytdlpSearch(searchText);
             if (t) return { ...t, requestedBy };
           }
         }
-      } catch { /* falla silenciosa, caemos a búsqueda por texto si el track tiene título */ }
-      // Fallback: buscar el texto de la URL directamente (sin el ID de Spotify)
+      } catch (e: any) {
+        botLog('ERROR', `Spotify oEmbed: ${e?.message}`);
+      }
       return null;
     }
 
@@ -481,7 +496,7 @@ async function resolveTrack(query: string, requestedBy: string): Promise<Track |
         p.stdout.on('data', (d: Buffer) => { out += d.toString(); });
         p.stderr.on('data', (d: Buffer) => {
           const msg = d.toString().trim();
-          if (msg && !msg.includes('Broken pipe')) botLog('ERROR', `yt-dlp info stderr: ${msg}`);
+          if (msg && !isYtdlpNoise(msg)) botLog('ERROR', `yt-dlp info stderr: ${msg}`);
         });
         p.on('close', () => {
           const line = out.trim().split('\n')[0] ?? '';
@@ -522,6 +537,14 @@ function nowPlayingEmbed(track: Track, queued = false) {
 // Ruta al binario yt-dlp descargado por youtube-dl-exec
 const YTDLP_BIN = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp.exe');
 
+// Mensajes de stderr de yt-dlp que son ruido esperado, no errores reales
+function isYtdlpNoise(msg: string): boolean {
+  return msg.includes('Broken pipe')
+    || msg.includes('unable to write data')
+    || msg.includes('No supported JavaScript runtime')
+    || msg.includes('Invalid argument');
+}
+
 async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
   // yt-dlp es el único que se mantiene actualizado contra los cambios de YouTube
   // Pipe: yt-dlp stdout → createAudioResource → @discordjs/voice → discord opus
@@ -535,9 +558,7 @@ async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
   ]);
   proc.stderr.on('data', (d: Buffer) => {
     const msg = d.toString().trim();
-    if (msg && !msg.includes('Broken pipe') && !msg.includes('No supported JavaScript runtime')) {
-      botLog('ERROR', `yt-dlp stderr: ${msg}`);
-    }
+    if (msg && !isYtdlpNoise(msg)) botLog('ERROR', `yt-dlp stderr: ${msg}`);
   });
   if (!proc.stdout) throw new Error('yt-dlp: no stdout');
   const resource = createAudioResource(proc.stdout);
