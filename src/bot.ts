@@ -126,10 +126,34 @@ function isOnCooldown(userId: string): boolean {
   return Date.now() - (cooldowns.get(userId) ?? 0) < COOLDOWN_MS;
 }
 
-// ─── Strip <think> tokens ─────────────────────────────────────────────────────
+// ─── Strip <think> tokens y razonamiento en texto plano ──────────────────────
 
 function strip(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+  // Elimina bloques <think>...</think>
+  let out = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+
+  // Si el modelo razonó en texto plano (ej: "Okay, let me think about this...")
+  // detectamos el patrón y nos quedamos solo con la última respuesta real.
+  // Indicios: líneas en inglés de meta-razonamiento seguidas de la respuesta en español.
+  const metaPatterns = [
+    /^(okay|ok,?\s*let me|so,?\s*(the|i need|need to)|let me (think|try|figure)|i (should|need|have to|want to)|the user wants|looking at|wait,?\s*(but|the)|another (idea|example|angle)|maybe something like|but maybe)/i,
+  ];
+  const lines = out.split('\n');
+  // Busca desde dónde empieza la respuesta real (última línea no-meta que no está vacía)
+  let realStart = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    const isMeta = metaPatterns.some(p => p.test(trimmed));
+    if (!isMeta) realStart = i;
+  }
+  // Si hay razonamiento antes (realStart > 0 y hay líneas meta al inicio)
+  const firstNonEmpty = lines.findIndex(l => l.trim());
+  if (firstNonEmpty >= 0 && metaPatterns.some(p => p.test(lines[firstNonEmpty].trim()))) {
+    out = lines.slice(realStart).join('\n').trim();
+  }
+
+  return out;
 }
 
 // ─── Bot name (set after login) ───────────────────────────────────────────────
@@ -168,7 +192,11 @@ MODO DEV:
 
 MIEMBROS: ${members || 'cargando...'}
 
-${contextBlock}REGLA: Siempre responde. Nunca dejes la respuesta vacía.`;
+${contextBlock}REGLAS CRÍTICAS:
+- Siempre responde. Nunca dejes la respuesta vacía.
+- NUNCA escribas tu razonamiento, proceso de pensamiento, ni expliques cómo vas a responder. SOLO el mensaje final.
+- NUNCA uses frases como "Okay, let me...", "I need to...", "So, the roast could be...", "Let me think..." ni nada parecido.
+- Output directo: solo el texto que mandarías al chat, nada más.`;
   }
 
   return `Eres ${BOT_NAME}, el bot del servidor Discord "P. Diddy Party Island (PDPI)".
@@ -184,10 +212,12 @@ PERSONALIDAD — estilo Packgod:
 MIEMBROS DEL SERVIDOR: ${members || 'cargando...'}
 Rodrigo es el dueño.
 
-${contextBlock}REGLAS DURAS:
+${contextBlock}REGLAS CRÍTICAS — LEE ESTO PRIMERO:
+- OUTPUT DIRECTO SOLAMENTE. Lo que escribas aquí va directo al chat de Discord. NADA de razonamiento, NADA de "let me think", NADA de explicar tu proceso.
+- NUNCA empieces con "Okay", "So", "Let me", "I need to", "The user wants", ni ninguna frase de meta-comentario en inglés o español.
+- Si te piden un roast: escribe el roast directamente. Sin introducción, sin explicación.
 - SIEMPRE responde con contenido real. NUNCA respondas solo "lol" ni dejes la respuesta vacía.
-- Si te piden humillar/violar/destrozar a alguien, hazlo CON DETALLE y creatividad — usa el contexto del chat para hacerlo personal.
-- Si alguien dice slang o algo sin contexto, adivina la intención y responde en tono.
+- Si te piden humillar a alguien, hazlo CON DETALLE y creatividad — usa el contexto del chat para hacerlo personal.
 - Respuestas cortas pero con impacto. Si es un roast, que duela (de risa).`;
 }
 
