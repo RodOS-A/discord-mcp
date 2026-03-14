@@ -1,0 +1,22 @@
+{
+  "name": "discord-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Discord server management",
+  "type": "module",
+  "main": "build/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node build/index.js",
+    "dev": "tsc && node build/index.js"
+  },
+  "dependencies": {
+    "@discordjs/rest": "^2.4.0",
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "discord-api-types": "^0.37.97",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}
