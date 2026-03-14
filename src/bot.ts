@@ -3,22 +3,19 @@ import {
   GatewayIntentBits,
   Events,
   Message,
-  TextChannel,
-  DMChannel,
-  NewsChannel,
-  ThreadChannel,
 } from 'discord.js';
-import Anthropic from '@anthropic-ai/sdk';
+import { Ollama } from 'ollama';
+import fs from 'fs';
+import path from 'path';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const BOT_TOKEN      = process.env.DISCORD_BOT_TOKEN!;
-const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY!;
-const GUILD_ID       = process.env.DISCORD_GUILD_ID!;
+const BOT_TOKEN    = process.env.DISCORD_BOT_TOKEN!;
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'qwen3:4b';
+const OLLAMA_HOST  = process.env.OLLAMA_HOST  ?? 'http://localhost:11434';
 
-if (!BOT_TOKEN)     throw new Error('Missing DISCORD_BOT_TOKEN');
-if (!ANTHROPIC_KEY) throw new Error('Missing ANTHROPIC_API_KEY');
+if (!BOT_TOKEN) throw new Error('Missing DISCORD_BOT_TOKEN');
 
 // ─── Clients ──────────────────────────────────────────────────────────────────
 
@@ -31,13 +28,34 @@ const client = new Client({
   ],
 });
 
-const anthropic = new Anthropic({ apiKey: ANTHROPIC_KEY });
+const ollama = new Ollama({ host: OLLAMA_HOST });
 
-// ─── Conversation history (per channel, in-memory) ───────────────────────────
+// ─── Persistent memory (per channel) ─────────────────────────────────────────
 
 type HistoryEntry = { role: 'user' | 'assistant'; content: string };
-const history = new Map<string, HistoryEntry[]>();
-const MAX_HISTORY_PAIRS = 10; // keep last 10 exchanges
+
+const MEMORY_FILE     = path.join(process.cwd(), 'data', 'memory.json');
+const MAX_HISTORY_PAIRS = 10;
+
+function loadMemory(): Map<string, HistoryEntry[]> {
+  try {
+    const raw = fs.readFileSync(MEMORY_FILE, 'utf-8');
+    return new Map(Object.entries(JSON.parse(raw) as Record<string, HistoryEntry[]>));
+  } catch {
+    return new Map();
+  }
+}
+
+function saveMemory(map: Map<string, HistoryEntry[]>): void {
+  try {
+    fs.mkdirSync(path.dirname(MEMORY_FILE), { recursive: true });
+    fs.writeFileSync(MEMORY_FILE, JSON.stringify(Object.fromEntries(map), null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Failed to save memory:', err);
+  }
+}
+
+const history = loadMemory();
 
 function getHistory(channelId: string): HistoryEntry[] {
   if (!history.has(channelId)) history.set(channelId, []);
@@ -47,8 +65,8 @@ function getHistory(channelId: string): HistoryEntry[] {
 function appendHistory(channelId: string, role: 'user' | 'assistant', content: string) {
   const h = getHistory(channelId);
   h.push({ role, content });
-  // Trim to max pairs (each pair = 2 entries)
   if (h.length > MAX_HISTORY_PAIRS * 2) h.splice(0, 2);
+  saveMemory(history);
 }
 
 // ─── Cooldowns ────────────────────────────────────────────────────────────────
@@ -63,7 +81,7 @@ function isOnCooldown(userId: string): boolean {
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `Eres Claude, un asistente de IA integrado como bot en el servidor de Discord "P. Diddy Party Island (PDPI)".
+const SYSTEM_PROMPT = `Eres un asistente de IA integrado como bot en el servidor de Discord "P. Diddy Party Island (PDPI)".
 
 Reglas:
 - Responde siempre en el mismo idioma que el usuario.
@@ -73,23 +91,29 @@ Reglas:
 - No repitas el nombre del usuario al inicio de cada respuesta.
 - Si no sabes algo, dilo claramente.`;
 
-// ─── Claude API call ──────────────────────────────────────────────────────────
+// ─── Strip <think> tokens (emitted by qwen3 before the actual answer) ─────────
 
-async function askClaude(channelId: string, userInput: string, username: string): Promise<string> {
+function stripThinkingTokens(text: string): string {
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+
+// ─── Ollama API call ──────────────────────────────────────────────────────────
+
+async function askOllama(channelId: string, userInput: string, username: string): Promise<string> {
   appendHistory(channelId, 'user', `${username}: ${userInput}`);
 
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
-    max_tokens: 1024,
-    system: SYSTEM_PROMPT,
-    messages: getHistory(channelId),
+  const response = await ollama.chat({
+    model: OLLAMA_MODEL,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...getHistory(channelId),
+    ],
+    options: { num_predict: 1024 },
   });
 
-  const reply =
-    response.content[0].type === 'text'
-      ? response.content[0].text
-      : '(no response)';
-
+  // Strip thinking tokens BEFORE saving to history — prevents the model from
+  // receiving its own reasoning as context in subsequent turns.
+  const reply = stripThinkingTokens(response.message.content);
   appendHistory(channelId, 'assistant', reply);
   return reply;
 }
@@ -102,7 +126,6 @@ async function sendReply(message: Message, text: string): Promise<void> {
     return;
   }
 
-  // Split on newlines, keep chunks under 1950 chars
   const lines = text.split('\n');
   const chunks: string[] = [];
   let current = '';
@@ -130,19 +153,18 @@ async function sendReply(message: Message, text: string): Promise<void> {
 
 client.once(Events.ClientReady, (c) => {
   console.log(`✅ Bot conectado como ${c.user.tag} (${c.user.id})`);
-  console.log(`   Servidores: ${c.guilds.cache.size}`);
+  console.log(`   Modelo: ${OLLAMA_MODEL} @ ${OLLAMA_HOST}`);
+  console.log(`   Canales en memoria: ${history.size}`);
 });
 
 // ─── Event: Message ───────────────────────────────────────────────────────────
 
 client.on(Events.MessageCreate, async (message: Message) => {
-  // Ignore bots (including self)
   if (message.author.bot) return;
 
   const isMentioned = client.user ? message.mentions.has(client.user) : false;
   const isDM        = !message.guild;
 
-  // Only respond to: @mention in server, or any DM
   if (!isMentioned && !isDM) return;
 
   // Cooldown
@@ -169,16 +191,15 @@ client.on(Events.MessageCreate, async (message: Message) => {
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
   } catch {}
 
-  // Call Claude
   const channelId = isDM ? `dm_${message.author.id}` : message.channel.id;
 
   try {
-    const reply = await askClaude(channelId, content, message.author.username);
+    const reply = await askOllama(channelId, content, message.author.username);
     await sendReply(message, reply);
   } catch (err: any) {
-    console.error('Claude API error:', err?.message ?? err);
+    console.error('Ollama error:', err?.message ?? err);
     await message.reply({
-      content: '❌ Error al procesar tu mensaje. Inténtalo de nuevo.',
+      content: '❌ Error al procesar tu mensaje. ¿Está Ollama corriendo? (`ollama serve`)',
       allowedMentions: { repliedUser: false },
     });
   }

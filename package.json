@@ -12,12 +12,12 @@
     "dev:bot": "tsc && node build/bot.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.78.0",
     "@discordjs/rest": "^2.4.0",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "discord-api-types": "^0.37.97",
     "discord.js": "^14.25.1",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "ollama": "^0.6.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -19,7 +19,8 @@ Usa la REST API de Discord a través de `@discordjs/rest` y se conecta via stdio
 - **MCP SDK:** `@modelcontextprotocol/sdk`
 - **Discord REST:** `@discordjs/rest` + `discord-api-types/v10`
 - **Discord Gateway:** `discord.js` v14 (bot con websocket)
-- **IA:** `@anthropic-ai/sdk` → `claude-sonnet-4-6`
+- **IA:** `ollama` (local, sin API key) → `qwen3:4b` por defecto
+- **Memoria:** `data/memory.json` (persistente entre reinicios, gitignoreado)
 - **Config:** `dotenv` → `.env` (nunca commiteado)
 
 ## Variables de entorno
@@ -27,7 +28,8 @@ Usa la REST API de Discord a través de `@discordjs/rest` y se conecta via stdio
 ```
 DISCORD_BOT_TOKEN=<bot token>
 DISCORD_GUILD_ID=<server id>
-ANTHROPIC_API_KEY=<anthropic api key>   # requerida para el bot Gateway
+OLLAMA_MODEL=qwen3:4b          # opcional, default: qwen3:4b
+OLLAMA_HOST=http://localhost:11434  # opcional, default: localhost
 ```
 
 Ver `.env.example` para referencia.
@@ -101,6 +103,13 @@ El bot Gateway (`bot.ts`) requiere `MESSAGE_CONTENT` intent habilitado en Discor
 ---
 
 ## Changelog
+
+### v4.0.0 — 2026-03-14
+- Reemplazado Anthropic API por Ollama (local, gratuito, sin API key)
+- Modelo por defecto: `qwen3:4b` (configurable via `OLLAMA_MODEL`)
+- Memoria persistente en `data/memory.json` (sobrevive reinicios del bot)
+- Strip automático de tokens `<think>...</think>` de qwen3
+- Eliminada dependencia `@anthropic-ai/sdk`, añadida `ollama`
 
 ### v3.0.0 — 2026-03-14
 - Nuevo `src/bot.ts`: bot Gateway con discord.js v14
