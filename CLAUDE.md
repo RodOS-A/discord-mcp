@@ -58,10 +58,16 @@ npm start       # Ejecuta build/index.js directamente
 |-----------|-------------|
 | Roles | list_roles, create_role, update_role, delete_role, assign_role, remove_role |
 | Canales | list_channels, create_channel, update_channel, delete_channel |
+| Permisos de canal | get_channel_permissions, set_channel_permission, delete_channel_permission |
 | Categorías | create_category |
-| Mensajes | send_message, fetch_messages, delete_message, pin_message |
-| Miembros | list_members, get_member_info, kick_member, ban_member, unban_member |
-| Servidor | get_server_info |
+| Mensajes | send_message, send_embed, send_dm, edit_message, fetch_messages, delete_message, pin_message |
+| Reacciones | add_reaction, remove_reaction, get_reactions |
+| Miembros | list_members, get_member_info, set_nickname, timeout_member, move_member_voice, mute_member, deafen_member, get_voice_state, kick_member, ban_member, unban_member |
+| Servidor | get_server_info, update_server |
+| Emojis | list_emojis, create_emoji, update_emoji, delete_emoji |
+| Stickers | list_stickers, update_sticker, delete_sticker |
+| Eventos | list_events, create_event, update_event, delete_event |
+| Stage | create_stage, update_stage, delete_stage |
 | Webhooks | list_webhooks, create_webhook, delete_webhook |
 | Threads | list_active_threads, create_thread |
 | Invitaciones | list_invites, create_invite, delete_invite |
@@ -85,6 +91,10 @@ build/
 ---
 
 ## Changelog
+
+### v2.0.0 — 2026-03-14
+- Añadidas 22 herramientas nuevas: permisos de canal, embeds, DMs, edición de mensajes, reacciones, nickname, timeout, voz (mute/deafen/move/voice_state), update_server, emojis, stickers, eventos programados, stage instances
+- Total: 49 herramientas
 
 ### v1.0.0 — 2026-03-14
 - Implementación inicial completa del servidor MCP

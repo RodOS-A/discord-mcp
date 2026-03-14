@@ -19,7 +19,7 @@ if (!GUILD_ID) throw new Error('Missing DISCORD_GUILD_ID environment variable');
 const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
 const server = new Server(
-  { name: 'discord-mcp', version: '1.0.0' },
+  { name: 'discord-mcp', version: '2.0.0' },
   { capabilities: { tools: {} } }
 );
 
@@ -115,7 +115,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           name: { type: 'string', description: 'Channel name' },
           type: {
             type: 'number',
-            description: 'Channel type: 0=text, 2=voice, 5=announcement, 15=forum. Default: 0',
+            description: 'Channel type: 0=text, 2=voice, 5=announcement, 13=stage, 15=forum. Default: 0',
           },
           topic: { type: 'string', description: 'Channel topic/description' },
           category_id: { type: 'string', description: 'Parent category ID' },
@@ -153,6 +153,46 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
 
+    // ── CHANNEL PERMISSIONS ────────────────────────────────────────────────
+    {
+      name: 'get_channel_permissions',
+      description: 'Get the permission overwrites of a channel (per user or role)',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+        },
+        required: ['channel_id'],
+      },
+    },
+    {
+      name: 'set_channel_permission',
+      description: 'Set a permission overwrite for a user or role in a channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          target_id: { type: 'string', description: 'User ID or Role ID to set permissions for' },
+          type: { type: 'number', description: 'Overwrite type: 0=role, 1=member' },
+          allow: { type: 'string', description: 'Allowed permission bit flags as string (e.g. "1024" for VIEW_CHANNEL)' },
+          deny: { type: 'string', description: 'Denied permission bit flags as string' },
+        },
+        required: ['channel_id', 'target_id', 'type'],
+      },
+    },
+    {
+      name: 'delete_channel_permission',
+      description: 'Delete a permission overwrite for a user or role in a channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          target_id: { type: 'string', description: 'User ID or Role ID whose overwrite to delete' },
+        },
+        required: ['channel_id', 'target_id'],
+      },
+    },
+
     // ── CATEGORIES ─────────────────────────────────────────────────────────
     {
       name: 'create_category',
@@ -170,7 +210,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     // ── MESSAGES ───────────────────────────────────────────────────────────
     {
       name: 'send_message',
-      description: 'Send a message to a channel',
+      description: 'Send a text message to a channel',
       inputSchema: {
         type: 'object',
         properties: {
@@ -178,6 +218,64 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           content: { type: 'string', description: 'Message text content' },
         },
         required: ['channel_id', 'content'],
+      },
+    },
+    {
+      name: 'send_embed',
+      description: 'Send a message with an embed (rich card) to a channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          content: { type: 'string', description: 'Optional plain text above the embed' },
+          title: { type: 'string', description: 'Embed title' },
+          description: { type: 'string', description: 'Embed description (supports markdown)' },
+          color: { type: 'number', description: 'Embed color as decimal integer (e.g. 5814783 = blue)' },
+          url: { type: 'string', description: 'URL that the title links to' },
+          image_url: { type: 'string', description: 'URL of the main image' },
+          thumbnail_url: { type: 'string', description: 'URL of the thumbnail (small image on the right)' },
+          author_name: { type: 'string', description: 'Author name shown at the top of the embed' },
+          author_url: { type: 'string', description: 'URL for the author name link' },
+          footer_text: { type: 'string', description: 'Footer text at the bottom of the embed' },
+          fields: {
+            type: 'array',
+            description: 'Array of fields: [{"name":"Title","value":"Content","inline":false}]',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string' },
+                value: { type: 'string' },
+                inline: { type: 'boolean' },
+              },
+            },
+          },
+        },
+        required: ['channel_id'],
+      },
+    },
+    {
+      name: 'send_dm',
+      description: 'Send a direct message (DM) to a user',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID to DM' },
+          content: { type: 'string', description: 'Message content' },
+        },
+        required: ['user_id', 'content'],
+      },
+    },
+    {
+      name: 'edit_message',
+      description: 'Edit an existing message sent by the bot',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          message_id: { type: 'string', description: 'Message ID to edit' },
+          content: { type: 'string', description: 'New message content' },
+        },
+        required: ['channel_id', 'message_id', 'content'],
       },
     },
     {
@@ -217,6 +315,48 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
 
+    // ── REACTIONS ──────────────────────────────────────────────────────────
+    {
+      name: 'add_reaction',
+      description: 'Add a reaction (emoji) to a message',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          message_id: { type: 'string', description: 'Message ID' },
+          emoji: { type: 'string', description: 'Unicode emoji (e.g. "👍") or custom emoji in format "name:id" (e.g. "myemoji:123456789")' },
+        },
+        required: ['channel_id', 'message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'remove_reaction',
+      description: "Remove a reaction from a message (bot's own reaction by default)",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          message_id: { type: 'string', description: 'Message ID' },
+          emoji: { type: 'string', description: 'Unicode emoji or custom "name:id"' },
+          user_id: { type: 'string', description: 'User ID whose reaction to remove. Omit to remove the bot\'s own reaction.' },
+        },
+        required: ['channel_id', 'message_id', 'emoji'],
+      },
+    },
+    {
+      name: 'get_reactions',
+      description: 'Get the list of users who reacted with a specific emoji on a message',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Channel ID' },
+          message_id: { type: 'string', description: 'Message ID' },
+          emoji: { type: 'string', description: 'Unicode emoji or custom "name:id"' },
+        },
+        required: ['channel_id', 'message_id', 'emoji'],
+      },
+    },
+
     // ── MEMBERS ────────────────────────────────────────────────────────────
     {
       name: 'list_members',
@@ -231,6 +371,78 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'get_member_info',
       description: 'Get detailed information about a specific member',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID' },
+        },
+        required: ['user_id'],
+      },
+    },
+    {
+      name: 'set_nickname',
+      description: "Set or clear a member's nickname in the server",
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID (use "@me" for the bot itself)' },
+          nickname: { type: 'string', description: 'New nickname. Leave empty or null to reset to username.' },
+        },
+        required: ['user_id'],
+      },
+    },
+    {
+      name: 'timeout_member',
+      description: 'Temporarily timeout (silence) a member for a given duration',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID' },
+          duration_minutes: { type: 'number', description: 'Timeout duration in minutes (max 40320 = 28 days). Use 0 to remove timeout.' },
+          reason: { type: 'string', description: 'Reason for timeout (appears in audit log)' },
+        },
+        required: ['user_id', 'duration_minutes'],
+      },
+    },
+    {
+      name: 'move_member_voice',
+      description: 'Move a member to a different voice channel (member must already be in voice)',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID' },
+          channel_id: { type: 'string', description: 'Target voice channel ID. Use null to disconnect from voice.' },
+        },
+        required: ['user_id'],
+      },
+    },
+    {
+      name: 'mute_member',
+      description: 'Server-mute or unmute a member in voice channels',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID' },
+          mute: { type: 'boolean', description: 'true to mute, false to unmute' },
+        },
+        required: ['user_id', 'mute'],
+      },
+    },
+    {
+      name: 'deafen_member',
+      description: 'Server-deafen or undeafen a member in voice channels',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          user_id: { type: 'string', description: 'Discord user ID' },
+          deaf: { type: 'boolean', description: 'true to deafen, false to undeafen' },
+        },
+        required: ['user_id', 'deaf'],
+      },
+    },
+    {
+      name: 'get_voice_state',
+      description: "Get a member's current voice state (channel, mute, deafen status)",
       inputSchema: {
         type: 'object',
         properties: {
@@ -284,6 +496,201 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'get_server_info',
       description: 'Get general information about the Discord server',
       inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'update_server',
+      description: 'Update server settings (name, icon, verification level, etc.)',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'New server name' },
+          description: { type: 'string', description: 'Server description' },
+          verification_level: { type: 'number', description: 'Verification level: 0=none, 1=low, 2=medium, 3=high, 4=very high' },
+          default_message_notifications: { type: 'number', description: 'Default notifications: 0=all messages, 1=only mentions' },
+          explicit_content_filter: { type: 'number', description: 'Content filter: 0=disabled, 1=no role, 2=all members' },
+          afk_channel_id: { type: 'string', description: 'AFK voice channel ID' },
+          afk_timeout: { type: 'number', description: 'AFK timeout in seconds: 60, 300, 900, 1800, 3600' },
+          preferred_locale: { type: 'string', description: 'Server locale (e.g. "en-US", "es-ES")' },
+          icon: { type: 'string', description: 'Server icon as base64 data URI (e.g. "data:image/png;base64,...")' },
+          banner: { type: 'string', description: 'Server banner as base64 data URI (requires boost level 2+)' },
+        },
+      },
+    },
+
+    // ── EMOJIS ─────────────────────────────────────────────────────────────
+    {
+      name: 'list_emojis',
+      description: 'List all custom emojis in the server',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'create_emoji',
+      description: 'Create a new custom emoji in the server',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Emoji name (alphanumeric + underscores, 2-32 chars)' },
+          image: { type: 'string', description: 'Image as base64 data URI (e.g. "data:image/png;base64,...")' },
+          roles: {
+            type: 'array',
+            description: 'Role IDs that can use this emoji (empty = everyone)',
+            items: { type: 'string' },
+          },
+        },
+        required: ['name', 'image'],
+      },
+    },
+    {
+      name: 'update_emoji',
+      description: 'Rename a custom emoji or change which roles can use it',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          emoji_id: { type: 'string', description: 'Emoji ID' },
+          name: { type: 'string', description: 'New emoji name' },
+          roles: {
+            type: 'array',
+            description: 'Role IDs that can use this emoji (empty array = everyone)',
+            items: { type: 'string' },
+          },
+        },
+        required: ['emoji_id'],
+      },
+    },
+    {
+      name: 'delete_emoji',
+      description: 'Delete a custom emoji from the server',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          emoji_id: { type: 'string', description: 'Emoji ID to delete' },
+        },
+        required: ['emoji_id'],
+      },
+    },
+
+    // ── STICKERS ───────────────────────────────────────────────────────────
+    {
+      name: 'list_stickers',
+      description: 'List all custom stickers in the server',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'update_sticker',
+      description: 'Update a sticker name, description, or tags',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sticker_id: { type: 'string', description: 'Sticker ID' },
+          name: { type: 'string', description: 'New sticker name' },
+          description: { type: 'string', description: 'New sticker description' },
+          tags: { type: 'string', description: 'New autocomplete tags (comma separated, max 200 chars)' },
+        },
+        required: ['sticker_id'],
+      },
+    },
+    {
+      name: 'delete_sticker',
+      description: 'Delete a custom sticker from the server',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          sticker_id: { type: 'string', description: 'Sticker ID to delete' },
+        },
+        required: ['sticker_id'],
+      },
+    },
+
+    // ── SCHEDULED EVENTS ───────────────────────────────────────────────────
+    {
+      name: 'list_events',
+      description: 'List all scheduled events in the server',
+      inputSchema: { type: 'object', properties: {} },
+    },
+    {
+      name: 'create_event',
+      description: 'Create a scheduled event in the server',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: 'Event name' },
+          scheduled_start_time: { type: 'string', description: 'Start time in ISO8601 format (e.g. "2026-04-01T18:00:00Z")' },
+          scheduled_end_time: { type: 'string', description: 'End time in ISO8601 format (required for external events)' },
+          entity_type: { type: 'number', description: 'Location type: 1=stage channel, 2=voice channel, 3=external location' },
+          channel_id: { type: 'string', description: 'Voice/Stage channel ID (required for types 1 and 2)' },
+          location: { type: 'string', description: 'External location name (required for type 3)' },
+          description: { type: 'string', description: 'Event description' },
+          image: { type: 'string', description: 'Cover image as base64 data URI' },
+        },
+        required: ['name', 'scheduled_start_time', 'entity_type'],
+      },
+    },
+    {
+      name: 'update_event',
+      description: 'Update a scheduled event',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          event_id: { type: 'string', description: 'Scheduled event ID' },
+          name: { type: 'string', description: 'New event name' },
+          description: { type: 'string', description: 'New description' },
+          scheduled_start_time: { type: 'string', description: 'New start time in ISO8601 format' },
+          scheduled_end_time: { type: 'string', description: 'New end time in ISO8601 format' },
+          status: { type: 'number', description: 'Event status: 1=scheduled, 2=active, 3=completed, 4=cancelled' },
+          channel_id: { type: 'string', description: 'New channel ID' },
+          location: { type: 'string', description: 'New external location' },
+        },
+        required: ['event_id'],
+      },
+    },
+    {
+      name: 'delete_event',
+      description: 'Delete a scheduled event',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          event_id: { type: 'string', description: 'Scheduled event ID to delete' },
+        },
+        required: ['event_id'],
+      },
+    },
+
+    // ── STAGE INSTANCES ────────────────────────────────────────────────────
+    {
+      name: 'create_stage',
+      description: 'Start a stage instance in a stage channel',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Stage channel ID' },
+          topic: { type: 'string', description: 'Stage topic (1-120 characters)' },
+          privacy_level: { type: 'number', description: 'Privacy: 1=public, 2=guild only. Default: 2' },
+        },
+        required: ['channel_id', 'topic'],
+      },
+    },
+    {
+      name: 'update_stage',
+      description: 'Update the topic of an active stage instance',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Stage channel ID' },
+          topic: { type: 'string', description: 'New stage topic' },
+        },
+        required: ['channel_id', 'topic'],
+      },
+    },
+    {
+      name: 'delete_stage',
+      description: 'End/delete an active stage instance',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          channel_id: { type: 'string', description: 'Stage channel ID' },
+        },
+        required: ['channel_id'],
+      },
     },
 
     // ── WEBHOOKS ───────────────────────────────────────────────────────────
@@ -489,6 +896,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = { success: true, message: `Channel ${a.channel_id} deleted` };
         break;
 
+      // ── CHANNEL PERMISSIONS ───────────────────────────────────────────────
+      case 'get_channel_permissions': {
+        const channel = await rest.get(Routes.channel(a.channel_id)) as any;
+        result = { channel_id: a.channel_id, permission_overwrites: channel.permission_overwrites ?? [] };
+        break;
+      }
+
+      case 'set_channel_permission':
+        await rest.put(Routes.channelPermission(a.channel_id, a.target_id), {
+          body: {
+            type: a.type,
+            allow: a.allow ?? '0',
+            deny: a.deny ?? '0',
+          },
+        });
+        result = { success: true, message: `Permission overwrite set for ${a.target_id} in channel ${a.channel_id}` };
+        break;
+
+      case 'delete_channel_permission':
+        await rest.delete(Routes.channelPermission(a.channel_id, a.target_id));
+        result = { success: true, message: `Permission overwrite for ${a.target_id} removed from channel ${a.channel_id}` };
+        break;
+
       // ── CATEGORIES ────────────────────────────────────────────────────────
       case 'create_category':
         result = await rest.post(Routes.guildChannels(GUILD_ID), {
@@ -503,6 +933,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ── MESSAGES ──────────────────────────────────────────────────────────
       case 'send_message':
         result = await rest.post(Routes.channelMessages(a.channel_id), {
+          body: { content: a.content },
+        });
+        break;
+
+      case 'send_embed': {
+        const embed: Record<string, any> = {};
+        if (a.title) embed.title = a.title;
+        if (a.description) embed.description = a.description;
+        if (a.color !== undefined) embed.color = a.color;
+        if (a.url) embed.url = a.url;
+        if (a.image_url) embed.image = { url: a.image_url };
+        if (a.thumbnail_url) embed.thumbnail = { url: a.thumbnail_url };
+        if (a.author_name) embed.author = { name: a.author_name, ...(a.author_url && { url: a.author_url }) };
+        if (a.footer_text) embed.footer = { text: a.footer_text };
+        if (a.fields) embed.fields = a.fields;
+        result = await rest.post(Routes.channelMessages(a.channel_id), {
+          body: {
+            ...(a.content && { content: a.content }),
+            embeds: [embed],
+          },
+        });
+        break;
+      }
+
+      case 'send_dm': {
+        const dmChannel = await rest.post('/users/@me/channels' as `/${string}`, {
+          body: { recipient_id: a.user_id },
+        }) as any;
+        result = await rest.post(Routes.channelMessages(dmChannel.id), {
+          body: { content: a.content },
+        });
+        break;
+      }
+
+      case 'edit_message':
+        result = await rest.patch(Routes.channelMessage(a.channel_id, a.message_id), {
           body: { content: a.content },
         });
         break;
@@ -523,6 +989,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = { success: true, message: 'Message pinned' };
         break;
 
+      // ── REACTIONS ─────────────────────────────────────────────────────────
+      case 'add_reaction': {
+        const emojiEncoded = encodeURIComponent(a.emoji);
+        await rest.put(`/channels/${a.channel_id}/messages/${a.message_id}/reactions/${emojiEncoded}/@me` as `/${string}`);
+        result = { success: true, message: `Reaction ${a.emoji} added` };
+        break;
+      }
+
+      case 'remove_reaction': {
+        const emojiEncoded = encodeURIComponent(a.emoji);
+        const target = a.user_id ?? '@me';
+        await rest.delete(`/channels/${a.channel_id}/messages/${a.message_id}/reactions/${emojiEncoded}/${target}` as `/${string}`);
+        result = { success: true, message: `Reaction ${a.emoji} removed` };
+        break;
+      }
+
+      case 'get_reactions': {
+        const emojiEncoded = encodeURIComponent(a.emoji);
+        result = await rest.get(`/channels/${a.channel_id}/messages/${a.message_id}/reactions/${emojiEncoded}` as `/${string}`);
+        break;
+      }
+
       // ── MEMBERS ───────────────────────────────────────────────────────────
       case 'list_members':
         result = await rest.get(Routes.guildMembers(GUILD_ID), {
@@ -532,6 +1020,54 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'get_member_info':
         result = await rest.get(Routes.guildMember(GUILD_ID, a.user_id));
+        break;
+
+      case 'set_nickname': {
+        const nick = a.nickname ?? null;
+        if (a.user_id === '@me') {
+          result = await rest.patch(Routes.guildMember(GUILD_ID, '@me'), { body: { nick } });
+        } else {
+          result = await rest.patch(Routes.guildMember(GUILD_ID, a.user_id), { body: { nick } });
+        }
+        result = { success: true, message: `Nickname updated for ${a.user_id}` };
+        break;
+      }
+
+      case 'timeout_member': {
+        const until = a.duration_minutes > 0
+          ? new Date(Date.now() + a.duration_minutes * 60 * 1000).toISOString()
+          : null;
+        await rest.patch(Routes.guildMember(GUILD_ID, a.user_id), {
+          body: { communication_disabled_until: until },
+          ...(a.reason && { headers: { 'X-Audit-Log-Reason': a.reason } }),
+        });
+        result = { success: true, message: until ? `User ${a.user_id} timed out until ${until}` : `Timeout removed for ${a.user_id}` };
+        break;
+      }
+
+      case 'move_member_voice':
+        await rest.patch(Routes.guildMember(GUILD_ID, a.user_id), {
+          body: { channel_id: a.channel_id ?? null },
+        });
+        result = { success: true, message: a.channel_id ? `User ${a.user_id} moved to channel ${a.channel_id}` : `User ${a.user_id} disconnected from voice` };
+        break;
+
+      case 'mute_member':
+        await rest.patch(Routes.guildMember(GUILD_ID, a.user_id), {
+          body: { mute: a.mute },
+        });
+        result = { success: true, message: `User ${a.user_id} ${a.mute ? 'muted' : 'unmuted'}` };
+        break;
+
+      case 'deafen_member':
+        await rest.patch(Routes.guildMember(GUILD_ID, a.user_id), {
+          body: { deaf: a.deaf },
+        });
+        result = { success: true, message: `User ${a.user_id} ${a.deaf ? 'deafened' : 'undeafened'}` };
+        break;
+
+      case 'get_voice_state':
+        result = await rest.get(`/guilds/${GUILD_ID}/voice-states/${a.user_id}` as `/${string}`);
         break;
 
       case 'kick_member':
@@ -559,6 +1095,134 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await rest.get(Routes.guild(GUILD_ID));
         break;
 
+      case 'update_server':
+        result = await rest.patch(Routes.guild(GUILD_ID), {
+          body: {
+            ...(a.name !== undefined && { name: a.name }),
+            ...(a.description !== undefined && { description: a.description }),
+            ...(a.verification_level !== undefined && { verification_level: a.verification_level }),
+            ...(a.default_message_notifications !== undefined && { default_message_notifications: a.default_message_notifications }),
+            ...(a.explicit_content_filter !== undefined && { explicit_content_filter: a.explicit_content_filter }),
+            ...(a.afk_channel_id !== undefined && { afk_channel_id: a.afk_channel_id }),
+            ...(a.afk_timeout !== undefined && { afk_timeout: a.afk_timeout }),
+            ...(a.preferred_locale !== undefined && { preferred_locale: a.preferred_locale }),
+            ...(a.icon !== undefined && { icon: a.icon }),
+            ...(a.banner !== undefined && { banner: a.banner }),
+          },
+        });
+        break;
+
+      // ── EMOJIS ────────────────────────────────────────────────────────────
+      case 'list_emojis':
+        result = await rest.get(Routes.guildEmojis(GUILD_ID));
+        break;
+
+      case 'create_emoji':
+        result = await rest.post(Routes.guildEmojis(GUILD_ID), {
+          body: {
+            name: a.name,
+            image: a.image,
+            ...(a.roles !== undefined && { roles: a.roles }),
+          },
+        });
+        break;
+
+      case 'update_emoji':
+        result = await rest.patch(Routes.guildEmoji(GUILD_ID, a.emoji_id), {
+          body: {
+            ...(a.name !== undefined && { name: a.name }),
+            ...(a.roles !== undefined && { roles: a.roles }),
+          },
+        });
+        break;
+
+      case 'delete_emoji':
+        await rest.delete(Routes.guildEmoji(GUILD_ID, a.emoji_id));
+        result = { success: true, message: `Emoji ${a.emoji_id} deleted` };
+        break;
+
+      // ── STICKERS ──────────────────────────────────────────────────────────
+      case 'list_stickers':
+        result = await rest.get(Routes.guildStickers(GUILD_ID));
+        break;
+
+      case 'update_sticker':
+        result = await rest.patch(Routes.guildSticker(GUILD_ID, a.sticker_id), {
+          body: {
+            ...(a.name !== undefined && { name: a.name }),
+            ...(a.description !== undefined && { description: a.description }),
+            ...(a.tags !== undefined && { tags: a.tags }),
+          },
+        });
+        break;
+
+      case 'delete_sticker':
+        await rest.delete(Routes.guildSticker(GUILD_ID, a.sticker_id));
+        result = { success: true, message: `Sticker ${a.sticker_id} deleted` };
+        break;
+
+      // ── SCHEDULED EVENTS ──────────────────────────────────────────────────
+      case 'list_events':
+        result = await rest.get(Routes.guildScheduledEvents(GUILD_ID));
+        break;
+
+      case 'create_event':
+        result = await rest.post(Routes.guildScheduledEvents(GUILD_ID), {
+          body: {
+            name: a.name,
+            scheduled_start_time: a.scheduled_start_time,
+            privacy_level: 2, // GUILD_ONLY
+            entity_type: a.entity_type,
+            ...(a.scheduled_end_time && { scheduled_end_time: a.scheduled_end_time }),
+            ...(a.channel_id && { channel_id: a.channel_id }),
+            ...(a.location && { entity_metadata: { location: a.location } }),
+            ...(a.description && { description: a.description }),
+            ...(a.image && { image: a.image }),
+          },
+        });
+        break;
+
+      case 'update_event':
+        result = await rest.patch(Routes.guildScheduledEvent(GUILD_ID, a.event_id), {
+          body: {
+            ...(a.name !== undefined && { name: a.name }),
+            ...(a.description !== undefined && { description: a.description }),
+            ...(a.scheduled_start_time !== undefined && { scheduled_start_time: a.scheduled_start_time }),
+            ...(a.scheduled_end_time !== undefined && { scheduled_end_time: a.scheduled_end_time }),
+            ...(a.status !== undefined && { status: a.status }),
+            ...(a.channel_id !== undefined && { channel_id: a.channel_id }),
+            ...(a.location !== undefined && { entity_metadata: { location: a.location } }),
+          },
+        });
+        break;
+
+      case 'delete_event':
+        await rest.delete(Routes.guildScheduledEvent(GUILD_ID, a.event_id));
+        result = { success: true, message: `Event ${a.event_id} deleted` };
+        break;
+
+      // ── STAGE INSTANCES ───────────────────────────────────────────────────
+      case 'create_stage':
+        result = await rest.post(Routes.stageInstances(), {
+          body: {
+            channel_id: a.channel_id,
+            topic: a.topic,
+            privacy_level: a.privacy_level ?? 2,
+          },
+        });
+        break;
+
+      case 'update_stage':
+        result = await rest.patch(Routes.stageInstance(a.channel_id), {
+          body: { topic: a.topic },
+        });
+        break;
+
+      case 'delete_stage':
+        await rest.delete(Routes.stageInstance(a.channel_id));
+        result = { success: true, message: `Stage instance in channel ${a.channel_id} ended` };
+        break;
+
       // ── WEBHOOKS ──────────────────────────────────────────────────────────
       case 'list_webhooks':
         result = await rest.get(Routes.guildWebhooks(GUILD_ID));
@@ -584,7 +1248,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         result = await rest.post(Routes.threads(a.channel_id, a.message_id), {
           body: {
             name: a.name,
-            ...(a.message_id === undefined && { type: 11 }), // PUBLIC_THREAD for standalone
+            ...(a.message_id === undefined && { type: 11 }),
             auto_archive_duration: a.auto_archive_duration ?? 1440,
           },
         });
