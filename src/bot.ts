@@ -404,34 +404,44 @@ function fmtDuration(sec: number): string {
 async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
   try {
     // Spotify URL → extraer título → buscar en YouTube
-    const spType = play.sp_validate(query);
-    if (spType !== false && spType !== 'search') {
-      const sp = await play.spotify(query) as any;
-      if (sp?.type === 'track') query = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? query}`;
+    // Usamos includes() en lugar de sp_validate() que retorna 'search' para texto plano
+    if (query.includes('open.spotify.com') || query.startsWith('spotify:')) {
+      try {
+        const sp = await play.spotify(query) as any;
+        if (sp?.type === 'track') query = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? query}`;
+      } catch {
+        // Si falla la resolución Spotify, igual buscamos el texto original en YouTube
+      }
     }
 
     // YouTube URL directa
     if (play.yt_validate(query) === 'video') {
-      const info = await play.video_info(query);
-      const v = info.video_details;
-      return {
-        url: query,
-        title: v.title ?? query,
-        thumbnail: v.thumbnails?.[0]?.url,
-        duration: fmtDuration(v.durationInSec ?? 0),
-        requestedBy,
-      };
+      try {
+        const info = await play.video_info(query);
+        const v = info.video_details;
+        return {
+          url: query,
+          title: v.title ?? query,
+          thumbnail: v.thumbnails?.[0]?.url,
+          duration: fmtDuration(v.durationInSec ?? 0),
+          requestedBy,
+        };
+      } catch {
+        // Si falla video_info pero la URL parece válida, intentar stream directo
+        return { url: query, title: query, duration: '?:??', requestedBy };
+      }
     }
 
-    // Búsqueda por texto
-    const results = await play.search(query, { limit: 1, source: { youtube: 'video' } });
-    if (!results.length) return null;
-    const v = results[0] as any;
+    // Búsqueda por texto — play-dl a veces devuelve resultados con url undefined
+    // pedimos más resultados y tomamos el primero con URL válida
+    const results = await play.search(query, { limit: 5, source: { youtube: 'video' } });
+    const valid = (results as any[]).find(r => typeof r?.url === 'string' && r.url.startsWith('http'));
+    if (!valid) return null;
     return {
-      url: v.url,
-      title: v.title ?? query,
-      thumbnail: v.thumbnails?.[0]?.url,
-      duration: fmtDuration(v.durationInSec ?? 0),
+      url: valid.url,
+      title: valid.title ?? query,
+      thumbnail: valid.thumbnails?.[0]?.url,
+      duration: fmtDuration(valid.durationInSec ?? 0),
       requestedBy,
     };
   } catch (err) {
