@@ -16,7 +16,7 @@ dotenv.config();
 
 const LOG_FILE = path.join(process.cwd(), 'logs', 'bot.md');
 
-function botLog(level: 'INFO' | 'CMD' | 'ERROR' | 'MUSIC', msg: string): void {
+function botLog(level: 'INFO' | 'CMD' | 'ERROR' | 'MUSIC' | 'CLAUDE', msg: string): void {
   const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
   const line = `[${ts}] [${level}] ${msg}\n`;
   process.stdout.write(line);
@@ -666,7 +666,58 @@ async function sendReply(message: Message, text: string): Promise<void> {
 
 // ─── Setup #create channel ────────────────────────────────────────────────────
 
-let CREATE_CHANNEL_ID = '';
+let CREATE_CHANNEL_ID     = '';
+let MYPC_CATEGORY_ID      = '';
+let CLAUDECODE_CHANNEL_ID = '';
+let LOGSPC_CHANNEL_ID     = '';
+
+// Palabras que indican acciones potencialmente destructivas — piden confirmación antes de ejecutar
+const DANGER_WORDS = ['delete', 'remove', 'rm ', 'drop', 'uninstall', 'format',
+                      'elimina', 'borra ', 'borrar', 'eliminar', 'desinstala', 'truncar', 'truncate'];
+
+function isDangerousPrompt(text: string): boolean {
+  const lower = text.toLowerCase();
+  return DANGER_WORDS.some(k => lower.includes(k));
+}
+
+// Canal IDs donde hay confirmación pendiente — evita que "si"/"no" se procesen como prompts
+const pendingConfirmation = new Set<string>();
+
+async function logToLogspc(content: string): Promise<void> {
+  if (!LOGSPC_CHANNEL_ID) return;
+  try {
+    await discordREST('POST', `/channels/${LOGSPC_CHANNEL_ID}/messages`,
+      { content: content.slice(0, 2000) });
+  } catch { /* non-blocking */ }
+}
+
+async function runClaudeCode(prompt: string): Promise<string> {
+  return new Promise((resolve) => {
+    botLog('CLAUDE', `Ejecutando: "${prompt.slice(0, 100)}"`);
+    const proc = spawn(
+      'claude',
+      ['-p', prompt, '--dangerously-skip-permissions'],
+      { cwd: process.cwd(), shell: true },
+    );
+    let out = '';
+    const timer = setTimeout(() => {
+      try { proc.kill(); } catch {}
+      resolve('⏰ Timeout: Claude Code tardó más de 5 minutos.');
+    }, 5 * 60 * 1000);
+    proc.stdout?.on('data', (d: Buffer) => { out += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { out += d.toString(); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      botLog('CLAUDE', `Proceso terminó con código ${code}`);
+      resolve(out.trim() || '(sin output)');
+    });
+    proc.on('error', (e) => {
+      clearTimeout(timer);
+      botLog('ERROR', `runClaudeCode spawn: ${e.message}`);
+      resolve(`❌ No se pudo lanzar Claude Code: ${e.message}\n(¿está \`claude\` en el PATH?)`);
+    });
+  });
+}
 
 async function setupCreateChannel(botId: string): Promise<void> {
   const existing = [...cacheChannels.values()].find(
@@ -696,6 +747,60 @@ async function setupCreateChannel(botId: string): Promise<void> {
   await refreshGuildCache();
 }
 
+async function setupMyPcChannels(botId: string): Promise<void> {
+  // 1. Buscar o crear categoría mypc
+  const mypcCat = [...cacheChannels.values()].find(c => c.type === 4 && c.name.toLowerCase() === 'mypc');
+  if (mypcCat) {
+    MYPC_CATEGORY_ID = mypcCat.id;
+  } else {
+    const cat = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, { name: 'mypc', type: 4 });
+    MYPC_CATEGORY_ID = cat.id;
+    await refreshGuildCache();
+  }
+
+  // 2. Buscar o crear #claudecode — solo Rodrigo y el bot
+  const ccChan = [...cacheChannels.values()].find(c => c.name === 'claudecode' && c.parent_id === MYPC_CATEGORY_ID);
+  if (ccChan) {
+    CLAUDECODE_CHANNEL_ID = ccChan.id;
+  } else {
+    const ch = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, {
+      name: 'claudecode',
+      type: 0,
+      parent_id: MYPC_CATEGORY_ID,
+      topic: 'Escribe un prompt y Claude Code lo ejecuta en tu PC.',
+      permission_overwrites: [
+        { id: GUILD_ID,   type: 0, allow: '0',       deny: BITS_FULL },
+        { id: RODRIGO_ID, type: 1, allow: BITS_FULL, deny: '0' },
+        { id: botId,      type: 1, allow: BITS_FULL, deny: '0' },
+      ],
+    });
+    CLAUDECODE_CHANNEL_ID = ch.id;
+  }
+
+  // 3. Buscar o crear #logspc — todos pueden leer, solo bot y Rodrigo pueden escribir
+  const VIEW_READ = '66560'; // VIEW_CHANNEL(1024) + READ_MESSAGE_HISTORY(65536)
+  const logsChan = [...cacheChannels.values()].find(c => c.name === 'logspc' && c.parent_id === MYPC_CATEGORY_ID);
+  if (logsChan) {
+    LOGSPC_CHANNEL_ID = logsChan.id;
+  } else {
+    const ch = await discordREST('POST', `/guilds/${GUILD_ID}/channels`, {
+      name: 'logspc',
+      type: 0,
+      parent_id: MYPC_CATEGORY_ID,
+      topic: 'Log automático de todas las acciones ejecutadas por Claude Code.',
+      permission_overwrites: [
+        { id: GUILD_ID,   type: 0, allow: VIEW_READ, deny: '2048' }, // ver pero no escribir
+        { id: botId,      type: 1, allow: BITS_FULL, deny: '0' },
+        { id: RODRIGO_ID, type: 1, allow: BITS_FULL, deny: '0' },
+      ],
+    });
+    LOGSPC_CHANNEL_ID = ch.id;
+  }
+
+  console.log(`   mypc=${MYPC_CATEGORY_ID}  claudecode=${CLAUDECODE_CHANNEL_ID}  logspc=${LOGSPC_CHANNEL_ID}`);
+  await refreshGuildCache();
+}
+
 // ─── Event: Ready ─────────────────────────────────────────────────────────────
 
 client.once(Events.ClientReady, async (c) => {
@@ -705,6 +810,7 @@ client.once(Events.ClientReady, async (c) => {
 
   await refreshGuildCache();
   await setupCreateChannel(c.user.id);
+  await setupMyPcChannels(c.user.id);
 
   console.log(`   Memoria: ${history.size} canales guardados`);
 
@@ -739,11 +845,65 @@ client.once(Events.ClientReady, async (c) => {
 client.on(Events.MessageCreate, async (message: Message) => {
   if (message.author.bot) return;
 
-  const isMentioned  = client.user ? message.mentions.has(client.user) : false;
-  const isDM         = !message.guild;
-  const isCreateChan = !!CREATE_CHANNEL_ID && message.channel.id === CREATE_CHANNEL_ID;
+  const isMentioned      = client.user ? message.mentions.has(client.user) : false;
+  const isDM             = !message.guild;
+  const isCreateChan     = !!CREATE_CHANNEL_ID     && message.channel.id === CREATE_CHANNEL_ID;
+  const isClaudeCodeChan = !!CLAUDECODE_CHANNEL_ID && message.channel.id === CLAUDECODE_CHANNEL_ID;
 
-  if (!isMentioned && !isDM && !isCreateChan) return;
+  if (!isMentioned && !isDM && !isCreateChan && !isClaudeCodeChan) return;
+
+  // ── #claudecode: bridge → Claude Code CLI ────────────────────────────────
+  if (isClaudeCodeChan) {
+    // Solo Rodrigo puede enviar prompts
+    if (message.author.id !== RODRIGO_ID) return;
+
+    const prompt = message.content.trim();
+    if (!prompt) return;
+
+    // Ignorar si hay una confirmación pendiente (respuestas "si"/"no")
+    if (pendingConfirmation.has(message.channel.id)) return;
+
+    const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+
+    // Pre-check: confirmar acciones potencialmente peligrosas
+    if (isDangerousPrompt(prompt)) {
+      pendingConfirmation.add(message.channel.id);
+      try {
+        await message.reply({
+          content: `⚠️ **Acción potencialmente peligrosa detectada.**\nPrompt: \`${prompt.slice(0, 300)}\`\n\nResponde **si** para confirmar o **no** para cancelar *(60s)*`,
+          allowedMentions: { repliedUser: false },
+        });
+        const collected = await (message.channel as any).awaitMessages({
+          filter: (m: Message) =>
+            m.author.id === RODRIGO_ID &&
+            ['si', 'sí', 'no'].includes(m.content.toLowerCase().trim()),
+          max: 1,
+          time: 60_000,
+          errors: ['time'],
+        }).catch(() => null);
+
+        const resp = (collected as any)?.first()?.content?.toLowerCase()?.trim();
+        if (resp !== 'si' && resp !== 'sí') {
+          const reason = collected ? 'cancelado' : 'timeout (60s)';
+          await message.reply({ content: `❌ Acción ${reason}.`, allowedMentions: { repliedUser: false } });
+          await logToLogspc(`\`[${ts}]\` ❌ **CANCELADO** (${reason})\n> \`${prompt.slice(0, 300)}\``);
+          return;
+        }
+      } finally {
+        pendingConfirmation.delete(message.channel.id);
+      }
+    }
+
+    botLog('CLAUDE', `Prompt de Discord: "${prompt.slice(0, 100)}"`);
+    await logToLogspc(`\`[${ts}]\` 📥 **PROMPT**\n\`\`\`\n${prompt.slice(0, 800)}\n\`\`\``);
+
+    if ('sendTyping' in message.channel) await message.channel.sendTyping();
+    const result = await runClaudeCode(prompt);
+
+    await logToLogspc(`\`[${ts}]\` ✅ **RESULTADO**\n\`\`\`\n${result.slice(0, 1500)}\n\`\`\``);
+    await sendReply(message, result || '(sin output)');
+    return;
+  }
 
   // ── #create: execute Discord admin commands ───────────────────────────────
   if (isCreateChan) {

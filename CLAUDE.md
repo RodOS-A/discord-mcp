@@ -271,6 +271,15 @@ Todos deben estar activados en [discord.com/developers/applications](https://dis
 
 ## Changelog
 
+### v10.0.0 — 2026-03-14
+- **ClaudeCode bridge**: canal `#claudecode` (categoría mypc, solo Rodrigo) → spawns `claude -p "prompt" --dangerously-skip-permissions` → resultado en Discord + log en `#logspc`
+- **`#logspc`**: canal de log (todos pueden leer, solo bot escribe) — registra todos los prompts y resultados con timestamp
+- **Confirmación de acciones peligrosas**: si el prompt contiene keywords destructivos (delete, rm, eliminar, borrar, etc.), el bot pide confirmación "si"/"no" con 60s de timeout
+- `setupMyPcChannels()`: crea categoría `mypc` + canales `claudecode` y `logspc` al arrancar el bot si no existen
+- `runClaudeCode(prompt)`: spawn del CLI `claude` con timeout 5 min, captura stdout+stderr
+- `logToLogspc()`, `isDangerousPrompt()`, `pendingConfirmation` Set
+- Nuevo nivel de log `CLAUDE` en `botLog()`
+
 ### v9.0.0 — 2026-03-14
 - Personalidad estilo Packgod: sin filtros, roasts creativos y personalizados
 - Modo dual automático: casual (canales generales) vs dev (DEV category / #mypc / #coding)
