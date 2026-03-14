@@ -7,125 +7,285 @@
 
 ---
 
-## Descripción
+## Descripción del proyecto
 
-Servidor MCP para gestionar un servidor de Discord desde Claude Desktop.
-Usa la REST API de Discord a través de `@discordjs/rest` y se conecta via stdio al protocolo MCP.
+Proyecto en dos partes que corren como **procesos independientes**:
 
-## Stack
+1. **MCP Server** (`src/index.ts`) — 49 herramientas REST para gestionar el servidor de Discord desde Claude Desktop via protocolo MCP (stdio).
+2. **Gateway Bot** (`src/bot.ts`) — Bot de Discord con websocket que responde @menciones y DMs usando IA local (Ollama), y ejecuta comandos en lenguaje natural en el canal `#create`.
 
-- **Runtime:** Node.js (ESM)
-- **Lenguaje:** TypeScript
-- **MCP SDK:** `@modelcontextprotocol/sdk`
-- **Discord REST:** `@discordjs/rest` + `discord-api-types/v10`
-- **Discord Gateway:** `discord.js` v14 (bot con websocket)
-- **IA:** `ollama` (local, sin API key) → `qwen3:4b` por defecto
-- **Memoria:** `data/memory.json` (persistente entre reinicios, gitignoreado)
-- **Config:** `dotenv` → `.env` (nunca commiteado)
+---
+
+## Stack completo
+
+| Capa | Tecnología |
+|------|-----------|
+| Runtime | Node.js v24 (ESM modules) |
+| Lenguaje | TypeScript 5.5 |
+| MCP | `@modelcontextprotocol/sdk` v1.10 |
+| Discord REST | `@discordjs/rest` v2.4 + `discord-api-types/v10` |
+| Discord Gateway | `discord.js` v14.25 |
+| IA local | `ollama` v0.6.3 → modelo `qwen3:4b` por defecto |
+| Memoria bot | `data/memory.json` (persistente entre reinicios) |
+| Config | `dotenv` → archivo `.env` (nunca commiteado) |
+
+---
 
 ## Variables de entorno
 
 ```
-DISCORD_BOT_TOKEN=<bot token>
-DISCORD_GUILD_ID=<server id>
-OLLAMA_MODEL=qwen3:4b          # opcional, default: qwen3:4b
-OLLAMA_HOST=http://localhost:11434  # opcional, default: localhost
+DISCORD_BOT_TOKEN=<token del bot>       # requerido
+DISCORD_GUILD_ID=<ID del servidor>      # requerido
+OLLAMA_MODEL=qwen3:4b                   # opcional, default: qwen3:4b
+OLLAMA_HOST=http://localhost:11434      # opcional, default: localhost
 ```
 
-Ver `.env.example` para referencia.
+**Nota:** `ANTHROPIC_API_KEY` fue eliminada en v4.0.0. El bot usa Ollama localmente, sin costos.
+
+---
+
+## IDs importantes del servidor
+
+| Entidad | ID |
+|---------|----|
+| Servidor (PDPI) | `1482410402850668575` |
+| @everyone role | `1482410402850668575` (igual que guild ID) |
+| Bot (KIA v1) | `1482414582579466240` |
+| Bot role (BOT1) | `1482415879449870451` |
+| Rodrigo (owner) | `998386333896687756` |
+| Canal #coding | `1482425745660841986` |
+| Categoría DEV | `1482437015562752093` |
+
+---
 
 ## Comandos
 
 ```bash
 npm run build       # Compila TypeScript → build/
-npm start           # Ejecuta MCP server (para Claude Desktop)
-npm run start:bot   # Ejecuta bot Gateway (responde @menciones con Claude IA)
-npm run dev         # Compila y ejecuta MCP server
-npm run dev:bot     # Compila y ejecuta bot Gateway
+npm start           # Lanza MCP server (para Claude Desktop)
+npm run start:bot   # Lanza Gateway bot (requiere Ollama corriendo)
+npm run dev         # Compila + lanza MCP server
+npm run dev:bot     # Compila + lanza Gateway bot
 ```
 
-## Configuración en Claude Desktop
+Para lanzar el bot: Ollama ya corre como servicio en background (puerto 11434).
+Solo ejecutar `npm run start:bot` desde el directorio del proyecto.
 
-`%APPDATA%/Claude/claude_desktop_config.json`:
+---
+
+## Configuración Claude Desktop
+
+Archivo: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
+  "preferences": { ... },
   "mcpServers": {
     "discord-mcp": {
       "command": "node",
-      "args": ["C:/Users/rodbl/OneDrive/Documentos/tests/discord-mcp/build/index.js"]
+      "args": ["C:/Users/rodbl/OneDrive/Documentos/tests/discord-mcp/build/index.js"],
+      "env": {
+        "DISCORD_BOT_TOKEN": "<token>",
+        "DISCORD_GUILD_ID": "1482410402850668575"
+      }
     }
   }
 }
 ```
 
-## Herramientas implementadas
+**Importante:** las variables de entorno van en el `env` del config porque Claude Desktop no carga el `.env` automáticamente.
 
-| Categoría | Herramientas |
-|-----------|-------------|
-| Roles | list_roles, create_role, update_role, delete_role, assign_role, remove_role |
-| Canales | list_channels, create_channel, update_channel, delete_channel |
-| Permisos de canal | get_channel_permissions, set_channel_permission, delete_channel_permission |
-| Categorías | create_category |
-| Mensajes | send_message, send_embed, send_dm, edit_message, fetch_messages, delete_message, pin_message |
-| Reacciones | add_reaction, remove_reaction, get_reactions |
-| Miembros | list_members, get_member_info, set_nickname, timeout_member, move_member_voice, mute_member, deafen_member, get_voice_state, kick_member, ban_member, unban_member |
-| Servidor | get_server_info, update_server |
-| Emojis | list_emojis, create_emoji, update_emoji, delete_emoji |
-| Stickers | list_stickers, update_sticker, delete_sticker |
-| Eventos | list_events, create_event, update_event, delete_event |
-| Stage | create_stage, update_stage, delete_stage |
-| Webhooks | list_webhooks, create_webhook, delete_webhook |
-| Threads | list_active_threads, create_thread |
-| Invitaciones | list_invites, create_invite, delete_invite |
-| Auditoría | get_audit_log |
+---
 
 ## Arquitectura
 
 ```
-src/
-  index.ts   # MCP server — 49 herramientas para gestión desde Claude Desktop
-  bot.ts     # Gateway bot — responde @menciones usando Claude API (claude-sonnet-4-6)
-build/
-  index.js   # Output compilado (gitignoreado)
-  bot.js
+discord-mcp/
+├── src/
+│   ├── index.ts        # MCP server — 49 tools, stdio transport
+│   └── bot.ts          # Gateway bot — Ollama + #create executor
+├── build/
+│   ├── index.js        # Compilado (gitignoreado)
+│   └── bot.js
+├── data/
+│   └── memory.json     # Historial de conversación por canal (gitignoreado)
+├── .env                # Credenciales reales (gitignoreado)
+├── .env.example        # Plantilla pública
+├── CLAUDE.md           # Este archivo
+├── package.json
+└── tsconfig.json
 ```
 
-Los dos procesos son independientes. El MCP server (`index.ts`) usa stdio y no necesita Gateway.
-El bot Gateway (`bot.ts`) requiere `MESSAGE_CONTENT` intent habilitado en Discord Developer Portal.
+---
 
-## Convenciones
+## MCP Server — 49 herramientas (`src/index.ts`)
 
-- Todo el servidor en un solo archivo `src/index.ts` (simple y mantenible)
-- Errores retornan `isError: true` con el mensaje de la API de Discord
-- Parámetros opcionales usan spread condicional (`...(x !== undefined && { key: x })`)
+| Categoría | Herramientas |
+|-----------|-------------|
+| Roles | `list_roles`, `create_role`, `update_role`, `delete_role`, `assign_role`, `remove_role` |
+| Canales | `list_channels`, `create_channel`, `update_channel`, `delete_channel` |
+| Permisos de canal | `get_channel_permissions`, `set_channel_permission`, `delete_channel_permission` |
+| Categorías | `create_category` |
+| Mensajes | `send_message`, `send_embed`, `send_dm`, `edit_message`, `fetch_messages`, `delete_message`, `pin_message` |
+| Reacciones | `add_reaction`, `remove_reaction`, `get_reactions` |
+| Miembros | `list_members`, `get_member_info`, `set_nickname`, `timeout_member`, `move_member_voice`, `mute_member`, `deafen_member`, `get_voice_state`, `kick_member`, `ban_member`, `unban_member` |
+| Servidor | `get_server_info`, `update_server` |
+| Emojis | `list_emojis`, `create_emoji`, `update_emoji`, `delete_emoji` |
+| Stickers | `list_stickers`, `update_sticker`, `delete_sticker` |
+| Eventos | `list_events`, `create_event`, `update_event`, `delete_event` |
+| Stage | `create_stage`, `update_stage`, `delete_stage` |
+| Webhooks | `list_webhooks`, `create_webhook`, `delete_webhook` |
+| Threads | `list_active_threads`, `create_thread` |
+| Invitaciones | `list_invites`, `create_invite`, `delete_invite` |
+| Auditoría | `get_audit_log` |
+
+---
+
+## Gateway Bot — `src/bot.ts`
+
+### Cómo funciona
+
+El bot escucha tres tipos de eventos:
+
+1. **@mención en cualquier canal** → responde usando Ollama (chat con personalidad)
+2. **DM directo al bot** → responde usando Ollama
+3. **Cualquier mensaje en `#create`** → interpreta como comando Discord y lo ejecuta
+
+### Personalidad
+- Se llama a sí mismo con el nombre de usuario del bot en Discord (detectado dinámicamente)
+- Directo, inteligente, sarcástico amistoso
+- Habla en el idioma del usuario (español/inglés)
+- Nunca se identifica como IA — es el bot del servidor
+
+### Memoria de conversación
+- Historial por canal guardado en `data/memory.json`
+- Máximo 10 intercambios por canal (20 entradas)
+- Persiste entre reinicios del bot
+- Los tokens `<think>` de qwen3 se eliminan ANTES de guardar en historial
+
+### Cooldown
+- 3 segundos entre respuestas por usuario
+- Si está en cooldown reacciona con ⏳
+
+### Canal `#create`
+- Se crea automáticamente al iniciar el bot si no existe
+- Ubicado en la categoría DEV (ID: `1482437015562752093`)
+- Permisos: solo Rodrigo y el bot pueden ver/escribir
+- Cualquier mensaje ahí → Ollama interpreta con `format: 'json'` y temperatura 0.1
+- El bot ejecuta directamente contra la Discord REST API
+
+**Acciones soportadas en #create:**
+`create_role`, `delete_role`, `ban_member`, `kick_member`, `unban_member`, `timeout_member`, `assign_role`, `remove_role`, `set_nickname`, `create_channel`, `delete_channel`, `create_category`, `send_message`
+
+### Guild cache
+- Al iniciar: carga miembros (hasta 1000), roles y canales en Maps en memoria
+- Se refresca cada 5 minutos automáticamente
+- Se refresca después de cada ejecución de acción en `#create`
+- El cache se incluye en el system prompt del ejecutor de comandos para que el modelo resuelva nombres → IDs
+
+### Intents de Discord requeridos (Privileged)
+Ambos deben estar activados en [discord.com/developers/applications](https://discord.com/developers/applications) → Bot:
+- ✅ `Server Members Intent`
+- ✅ `Message Content Intent`
+
+---
+
+## Estado actual del servidor Discord
+
+### Canal `#coding`
+- **Ubicación:** categoría DEV
+- **Permisos:** @everyone deny (VIEW+SEND+READ_HISTORY), Rodrigo allow, Bot allow
+- **Permission bits usados:** `68608` = VIEW_CHANNEL(1024) + SEND_MESSAGES(2048) + READ_MESSAGE_HISTORY(65536)
+- **Mensaje de bienvenida:** enviado y pineado
+
+### Bot nickname
+- Nickname en el servidor: `Claude` (cambiado via REST API en sesión 2026-03-14)
+- Username real en Discord: `KIA v1` (o el que tenga configurado en Dev Portal)
+
+### Canal `#create`
+- Ubicado en categoría DEV
+- Solo accesible por Rodrigo y el bot
+- Creado automáticamente por el bot al arrancar
+
+---
+
+## Convenciones de código
+
+- Un solo archivo por proceso (`index.ts` y `bot.ts`) — sin fragmentación innecesaria
+- Errores del MCP server retornan `isError: true` con mensaje de la API
+- Parámetros opcionales con spread condicional: `...(x !== undefined && { key: x })`
+- REST del bot via `fetch` nativo (Node 18+), no `@discordjs/rest`
+- Tokens `<think>` se stripean antes de guardar en historial y antes de enviar a Discord
+
+---
+
+## Repositorio GitHub
+
+- URL: `https://github.com/RodOS-A/discord-mcp`
+- Branch: `master`
+- Rama configurada para push automático con `git push`
 
 ---
 
 ## Changelog
 
+### v5.0.0 — 2026-03-14
+- Personalidad real: directa, sarcástica, habla como persona en Discord
+- Guild cache: miembros, roles y canales cargados al inicio y cada 5 min
+- Nombre del bot detectado dinámicamente (`c.user.username`)
+- Canal `#create` creado automáticamente bajo DEV con permisos Rodrigo+bot
+- Ejecutor de comandos en lenguaje natural → acciones Discord (13 tipos de acción)
+- Ollama en modo `format: 'json'` con temperatura 0.1 para comandos
+- Intento privilegiado `GuildMembers` añadido
+
 ### v4.0.0 — 2026-03-14
-- Reemplazado Anthropic API por Ollama (local, gratuito, sin API key)
+- Reemplazado Anthropic API (`claude-sonnet-4-6`) por Ollama local (gratis, sin API key)
 - Modelo por defecto: `qwen3:4b` (configurable via `OLLAMA_MODEL`)
-- Memoria persistente en `data/memory.json` (sobrevive reinicios del bot)
+- URL Ollama configurable via `OLLAMA_HOST`
+- Memoria persistente en `data/memory.json` (sobrevive reinicios)
 - Strip automático de tokens `<think>...</think>` de qwen3
 - Eliminada dependencia `@anthropic-ai/sdk`, añadida `ollama`
+- Eliminada variable `ANTHROPIC_API_KEY`
+
+### fix — 2026-03-14
+- Fallback `'¿En qué puedo ayudarte?'` cuando Ollama devuelve respuesta vacía tras strip de `<think>`
 
 ### v3.0.0 — 2026-03-14
 - Nuevo `src/bot.ts`: bot Gateway con discord.js v14
-- Responde a @menciones con IA real (claude-sonnet-4-6 via Anthropic API)
-- Responde a DMs directamente
-- Historial de conversación por canal (últimos 10 intercambios)
-- Cooldown de 3s por usuario
-- Mensajes largos divididos automáticamente (límite 2000 chars de Discord)
-- Nueva variable de entorno: `ANTHROPIC_API_KEY`
+- Responde @menciones con Anthropic API (`claude-sonnet-4-6`)
+- Responde DMs directamente
+- Historial de conversación por canal (10 pares máx)
+- Cooldown 3s por usuario, typing indicator, split de mensajes largos
 
 ### v2.0.0 — 2026-03-14
-- Añadidas 22 herramientas nuevas: permisos de canal, embeds, DMs, edición de mensajes, reacciones, nickname, timeout, voz (mute/deafen/move/voice_state), update_server, emojis, stickers, eventos programados, stage instances
-- Total: 49 herramientas
+- 22 herramientas nuevas en MCP server: permisos de canal, send_embed, send_dm,
+  edit_message, reacciones, set_nickname, timeout_member, voz (mute/deafen/move/voice_state),
+  update_server, emojis CRUD, stickers (list/update/delete), eventos programados CRUD,
+  stage instances CRUD
+- Total: 49 herramientas en `src/index.ts`
 
 ### v1.0.0 — 2026-03-14
-- Implementación inicial completa del servidor MCP
-- 27 herramientas cubriendo roles, canales, mensajes, miembros, webhooks, threads, invitaciones y audit log
-- Configuración de proyecto: TypeScript, ESM, dotenv
-- Setup de git + GitHub + Claude Desktop
+- MCP server inicial con 27 herramientas
+- Stack: TypeScript ESM, `@discordjs/rest`, `@modelcontextprotocol/sdk`, `dotenv`
+- Setup completo: git, GitHub (RodOS-A/discord-mcp), Claude Desktop config
+- `.env` con credenciales reales, `.gitignore` protegiendo secretos
+
+---
+
+## Acciones ejecutadas directamente via REST API (fuera del código)
+
+Las siguientes acciones se realizaron manualmente via `node --input-type=module` con fetch durante la sesión:
+
+1. **Permission overwrites en `#coding`** (2026-03-14):
+   - @everyone: deny `68608` (VIEW+SEND+READ_HISTORY)
+   - Rodrigo: allow `68608`
+   - Bot: allow `68608`
+
+2. **Nickname del bot → "Claude"** (2026-03-14):
+   - `PATCH /guilds/{id}/members/@me` con `{ nick: "Claude" }`
+
+3. **Categoría DEV creada** (ID: `1482437015562752093`)
+
+4. **Canal `#coding` movido a DEV**
+
+5. **Embed de bienvenida enviado y pineado en `#coding`**
