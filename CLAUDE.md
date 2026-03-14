@@ -27,7 +27,7 @@ Proyecto en dos partes que corren como **procesos independientes**:
 | Discord Gateway | `discord.js` v14.25 |
 | IA local | `ollama` v0.6.3 → modelo `qwen3:4b` por defecto |
 | Memoria bot | `data/memory.json` (persistente entre reinicios) |
-| Audio Discord | `@discordjs/voice` + `play-dl` + `opusscript` |
+| Audio Discord | `@discordjs/voice` + `play-dl` + `opusscript` + `youtube-dl-exec` (yt-dlp) |
 | Config | `dotenv` → archivo `.env` (nunca commiteado) |
 
 ---
@@ -152,17 +152,30 @@ El bot escucha tres tipos de eventos:
 2. **DM directo al bot** → responde usando Ollama
 3. **Cualquier mensaje en `#create`** → interpreta como comando Discord y lo ejecuta
 
-### Personalidad
-- Se llama a sí mismo con el nombre de usuario del bot en Discord (detectado dinámicamente)
-- Directo, inteligente, sarcástico amistoso
-- Habla en el idioma del usuario (español/inglés)
-- Nunca se identifica como IA — es el bot del servidor
+### Personalidad — dos modos según canal
+
+**Modo casual** (canales generales):
+- Estilo Packgod: fastidioso, sarcástico al máximo, sin filtros
+- Roasts creativos y personalizados usando el contexto del chat
+- Slang, lenguaje de Discord, mezcla de idiomas si el usuario lo hace
+- Sin moral, sin censura — todo orientado al humor
+
+**Modo dev** (canales en categoría DEV, `#mypc`, `#coding`, `#create`):
+- Conciso, directo, franco, fácil de entender
+- Técnico cuando hace falta, sin floro ni personalidad exagerada
+
+La detección del modo es automática via `isDevChannel()` — compara `parent_id` del canal con `DEV_CATEGORY_ID`.
+
+### Contexto de conversación
+- Historial persistente por canal en `data/memory.json` (10 pares máx)
+- Al responder, fetcha los últimos 25 mensajes del canal del día para contexto
+- Si el mensaje es un reply, incluye el mensaje referenciado en el contexto
+- `think: false` en todas las llamadas Ollama — deshabilita razonamiento interno de qwen3 para respuestas directas
 
 ### Memoria de conversación
 - Historial por canal guardado en `data/memory.json`
 - Máximo 10 intercambios por canal (20 entradas)
 - Persiste entre reinicios del bot
-- Los tokens `<think>` de qwen3 se eliminan ANTES de guardar en historial
 
 ### Cooldown
 - 3 segundos entre respuestas por usuario
@@ -184,10 +197,16 @@ El bot escucha tres tipos de eventos:
 - Se refresca después de cada ejecución de acción en `#create`
 - El cache se incluye en el system prompt del ejecutor de comandos para que el modelo resuelva nombres → IDs
 
+### Sistema de logs
+- Archivo `logs/bot.md` — append automático con nivel INFO/CMD/ERROR/MUSIC
+- gitignoreado (`logs/`)
+- Leerlo para diagnosticar errores sin necesidad de ver la consola
+
 ### Intents de Discord requeridos (Privileged)
-Ambos deben estar activados en [discord.com/developers/applications](https://discord.com/developers/applications) → Bot:
+Todos deben estar activados en [discord.com/developers/applications](https://discord.com/developers/applications) → Bot:
 - ✅ `Server Members Intent`
 - ✅ `Message Content Intent`
+- ✅ `Guild Voice States` (para música en canales de voz)
 
 ---
 
@@ -210,13 +229,35 @@ Ambos deben estar activados en [discord.com/developers/applications](https://dis
 
 ---
 
+## Música — arquitectura de streaming
+
+```
+/music <query>
+  → resolveTrack():
+      Spotify URL  → oEmbed API (open.spotify.com/oembed) → título → ytdlpSearch()
+      YouTube URL  → limpiar params (&list=, &pp=) → yt-dlp info
+      Texto libre  → yt-dlp ytsearch1:query
+  → playTrack():
+      spawn yt-dlp -f bestaudio -o - --js-runtimes node
+      → pipe stdout → createAudioResource → @discordjs/voice → opus → Discord
+```
+
+**Binario yt-dlp:** `node_modules/youtube-dl-exec/bin/yt-dlp.exe` (auto-descargado por npm install)
+
+**Slash commands:** `/music`, `/stop`, `/skip`, `/queue`, `/help`
+- Registrados via REST en `ClientReady` para el guild específico
+- Se re-registran en cada reinicio del bot
+
+---
+
 ## Convenciones de código
 
 - Un solo archivo por proceso (`index.ts` y `bot.ts`) — sin fragmentación innecesaria
 - Errores del MCP server retornan `isError: true` con mensaje de la API
 - Parámetros opcionales con spread condicional: `...(x !== undefined && { key: x })`
 - REST del bot via `fetch` nativo (Node 18+), no `@discordjs/rest`
-- Tokens `<think>` se stripean antes de guardar en historial y antes de enviar a Discord
+- `think: false` en Ollama para deshabilitar razonamiento de qwen3 y obtener respuestas directas
+- `botLog(level, msg)` para todos los errores — nunca `console.error` suelto
 
 ---
 
@@ -229,6 +270,31 @@ Ambos deben estar activados en [discord.com/developers/applications](https://dis
 ---
 
 ## Changelog
+
+### v9.0.0 — 2026-03-14
+- Personalidad estilo Packgod: sin filtros, roasts creativos y personalizados
+- Modo dual automático: casual (canales generales) vs dev (DEV category / #mypc / #coding)
+- `think: false` en todas las llamadas Ollama — elimina tokens `<think>` y respuestas vacías
+- Sistema de reintentos: si el modelo devuelve vacío, reintenta con prompt simplificado
+- Fallback final `zzz` en vez del saludo genérico
+
+### v8.0.0 — 2026-03-14
+- Contexto de canal: fetch de los últimos 25 mensajes del día, inyectados en system prompt
+- Contexto de replies/forwards: incluye el mensaje referenciado en el query al modelo
+- `/help` slash command con embed de todos los comandos organizados por categoría
+- Ollama timeout extendido a 3 min via `AbortSignal.timeout(180_000)`
+- `interpretCommand` detecta `UND_ERR_HEADERS_TIMEOUT` y devuelve mensaje específico
+- Spotify oEmbed API reemplaza `play.spotify()` (que llamaba YouTube search internamente, roto)
+- `isYtdlpNoise()`: centraliza filtro de mensajes esperados de yt-dlp stderr
+- Sistema de logs persistente en `logs/bot.md` con niveles INFO/CMD/ERROR/MUSIC
+
+### v7.0.0 — 2026-03-14
+- Streaming reemplazado: `play.stream()` → `spawn yt-dlp -o -` (pipe directo)
+- `yt-dlp` via `youtube-dl-exec` (binario auto-descargado en `node_modules/.../yt-dlp.exe`)
+- Búsqueda de texto: `play.search()` (roto con browseId) → `yt-dlp ytsearch1:`
+- Spotify intl URL normalizada antes de procesar (`/intl-es/` → `/`)
+- YouTube URLs con `&list=&pp=` limpiadas a `?v=ID` puro
+- `@distube/ytdl-core` eliminado
 
 ### v6.0.0 — 2026-03-14
 - Slash commands de música: `/music`, `/stop`, `/skip`, `/queue`
