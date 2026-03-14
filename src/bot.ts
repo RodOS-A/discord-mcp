@@ -607,6 +607,7 @@ client.once(Events.ClientReady, async (c) => {
     { name: 'stop',  description: 'Detiene la música y desconecta el bot' },
     { name: 'skip',  description: 'Salta a la siguiente canción en la cola' },
     { name: 'queue', description: 'Muestra la cola de reproducción actual' },
+    { name: 'help',  description: 'Muestra todos los comandos disponibles del bot' },
   ];
   const registered = await discordREST(
     'PUT',
@@ -766,6 +767,46 @@ client.on(Events.InteractionCreate, async (interaction) => {
         ...gp.queue.map((t, i) => `${i + 1}. ${t.title} (${t.duration})`),
       ];
       return void interaction.editReply(lines.join('\n'));
+    }
+
+    case 'help': {
+      const embed = {
+        color: 0x5865F2,
+        title: `📖 Comandos de ${BOT_NAME}`,
+        fields: [
+          {
+            name: '🎵 Música',
+            value: [
+              '`/music <nombre/artista/URL>` — Reproduce en tu canal de voz. Acepta búsquedas de texto, URLs de YouTube y URLs de Spotify.',
+              '`/skip` — Salta a la siguiente canción en la cola.',
+              '`/queue` — Muestra qué se está reproduciendo y la cola pendiente.',
+              '`/stop` — Detiene la reproducción y desconecta el bot del canal de voz.',
+            ].join('\n'),
+          },
+          {
+            name: '🤖 Chat con IA',
+            value: [
+              `\`@${BOT_NAME} <mensaje>\` — Habla con el bot en cualquier canal. Tiene memoria de conversación por canal.`,
+              '**DM directo** — También puedes escribirle por mensaje privado.',
+            ].join('\n'),
+          },
+          {
+            name: '⚙️ Administración (solo canal #create)',
+            value: [
+              'Escribe cualquier orden en lenguaje natural en **#create** y el bot la ejecuta:',
+              '`crea un rol llamado Admin de color rojo`',
+              '`banea a [usuario] por spam`',
+              '`crea un canal llamado general en la categoría DEV`',
+              '`dale el rol Mod a [usuario]`',
+              '`pon de nickname [nombre] a [usuario]`',
+              '',
+              'Acciones disponibles: crear/eliminar roles y canales, ban/kick/unban, timeout, asignar roles, cambiar nickname, crear categorías, enviar mensajes.',
+            ].join('\n'),
+          },
+        ],
+        footer: { text: 'Usa /help en cualquier momento para ver esta lista.' },
+      };
+      return void interaction.editReply({ embeds: [embed] });
     }
   }
 });
