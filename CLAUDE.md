@@ -12,7 +12,7 @@
 Proyecto en dos partes que corren como **procesos independientes**:
 
 1. **MCP Server** (`src/index.ts`) — 49 herramientas REST para gestionar el servidor de Discord desde Claude Desktop via protocolo MCP (stdio).
-2. **Gateway Bot** (`src/bot.ts`) — Bot de Discord con websocket que responde @menciones y DMs usando IA local (Ollama), y ejecuta comandos en lenguaje natural en el canal `#create`.
+2. **Gateway Bot** (`src/bot.ts`) — Bot de Discord con websocket que responde @menciones y DMs usando IA local (Ollama), ejecuta comandos en lenguaje natural en el canal `#create`, y reproduce música en canales de voz via slash commands.
 
 ---
 
@@ -27,6 +27,7 @@ Proyecto en dos partes que corren como **procesos independientes**:
 | Discord Gateway | `discord.js` v14.25 |
 | IA local | `ollama` v0.6.3 → modelo `qwen3:4b` por defecto |
 | Memoria bot | `data/memory.json` (persistente entre reinicios) |
+| Audio Discord | `@discordjs/voice` + `play-dl` + `opusscript` |
 | Config | `dotenv` → archivo `.env` (nunca commiteado) |
 
 ---
@@ -228,6 +229,17 @@ Ambos deben estar activados en [discord.com/developers/applications](https://dis
 ---
 
 ## Changelog
+
+### v6.0.0 — 2026-03-14
+- Slash commands de música: `/music`, `/stop`, `/skip`, `/queue`
+- Reproducción de audio en canales de voz via `@discordjs/voice` + `play-dl`
+- Soporte YouTube: URL directa y búsqueda por nombre/artista
+- Soporte Spotify: URL de track → resuelve a YouTube automáticamente
+- Cola de reproducción por servidor con avance automático
+- Embed "Now Playing" con thumbnail, duración y quien lo pidió
+- Auto-desconexión tras 3 min de inactividad sin cola
+- Intent `GuildVoiceStates` añadido
+- Nota: pantalla compartida no soportada por la API de Discord para bots (se muestran thumbnails en embed)
 
 ### v5.0.0 — 2026-03-14
 - Personalidad real: directa, sarcástica, habla como persona en Discord

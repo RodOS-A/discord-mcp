@@ -1,4 +1,9 @@
-import { Client, GatewayIntentBits, Events, Message } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Message, type GuildMember } from 'discord.js';
+import {
+  joinVoiceChannel, createAudioPlayer, createAudioResource,
+  AudioPlayerStatus, type VoiceConnection, type AudioPlayer,
+} from '@discordjs/voice';
+import play from 'play-dl';
 import { Ollama } from 'ollama';
 import fs from 'fs';
 import path from 'path';
@@ -24,6 +29,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,      // Privileged — enable in Dev Portal
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,    // Privileged — enable in Dev Portal
     GatewayIntentBits.DirectMessages,
@@ -368,6 +374,113 @@ async function executeActions(actions: any[]): Promise<string[]> {
   return results;
 }
 
+// ─── Music: data structures ───────────────────────────────────────────────────
+
+interface Track {
+  url: string;
+  title: string;
+  thumbnail?: string;
+  duration: string;
+  requestedBy: string;
+}
+
+interface GuildPlayer {
+  connection: VoiceConnection;
+  player: AudioPlayer;
+  queue: Track[];
+  current?: Track;
+  textChannelId: string;
+}
+
+const players = new Map<string, GuildPlayer>();
+
+// ─── Music: helpers ───────────────────────────────────────────────────────────
+
+function fmtDuration(sec: number): string {
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+async function resolveTrack(query: string, requestedBy: string): Promise<Track | null> {
+  try {
+    // Spotify URL → extraer título → buscar en YouTube
+    if (play.sp_validate(query) !== false) {
+      const sp = await play.spotify(query) as any;
+      if (sp?.type === 'track') query = `${sp.artists?.[0]?.name ?? ''} - ${sp.name ?? query}`;
+    }
+
+    // YouTube URL directa
+    if (play.yt_validate(query) === 'video') {
+      const info = await play.video_info(query);
+      const v = info.video_details;
+      return {
+        url: query,
+        title: v.title ?? query,
+        thumbnail: v.thumbnails?.[0]?.url,
+        duration: fmtDuration(v.durationInSec ?? 0),
+        requestedBy,
+      };
+    }
+
+    // Búsqueda por texto
+    const results = await play.search(query, { limit: 1, source: { youtube: 'video' } });
+    if (!results.length) return null;
+    const v = results[0] as any;
+    return {
+      url: v.url,
+      title: v.title ?? query,
+      thumbnail: v.thumbnails?.[0]?.url,
+      duration: fmtDuration(v.durationInSec ?? 0),
+      requestedBy,
+    };
+  } catch (err) {
+    console.error('resolveTrack error:', err);
+    return null;
+  }
+}
+
+function nowPlayingEmbed(track: Track, queued = false) {
+  return {
+    color: 0x1DB954,
+    author: { name: queued ? '📋 Añadido a la cola' : '🎵 Reproduciendo ahora' },
+    title: track.title,
+    url: track.url,
+    ...(track.thumbnail && { thumbnail: { url: track.thumbnail } }),
+    fields: [
+      { name: 'Duración', value: track.duration, inline: true },
+      { name: 'Pedido por', value: track.requestedBy, inline: true },
+    ],
+  };
+}
+
+async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
+  const stream = await play.stream(track.url);
+  const resource = createAudioResource(stream.stream, { inputType: stream.type as any });
+  gp.player.play(resource);
+  gp.current = track;
+  await discordREST('POST', `/channels/${gp.textChannelId}/messages`,
+    { embeds: [nowPlayingEmbed(track)] });
+}
+
+async function advanceQueue(guildId: string): Promise<void> {
+  const gp = players.get(guildId);
+  if (!gp) return;
+  const next = gp.queue.shift();
+  if (next) {
+    await playTrack(gp, next);
+  } else {
+    gp.current = undefined;
+    // Desconectar tras 3 min de inactividad si no hay nada en cola
+    setTimeout(() => {
+      const p = players.get(guildId);
+      if (p && !p.current && p.queue.length === 0) {
+        p.connection.destroy();
+        players.delete(guildId);
+      }
+    }, 3 * 60 * 1000);
+  }
+}
+
 // ─── Send long message ────────────────────────────────────────────────────────
 
 async function sendReply(message: Message, text: string): Promise<void> {
@@ -438,6 +551,27 @@ client.once(Events.ClientReady, async (c) => {
 
   console.log(`   Memoria: ${history.size} canales guardados`);
 
+  // Registrar slash commands de música
+  const slashCommands = [
+    {
+      name: 'music',
+      description: 'Reproduce música en tu canal de voz',
+      options: [
+        { type: 3, name: 'query', description: 'Nombre, artista o URL de YouTube/Spotify', required: true },
+        { type: 7, name: 'channel', description: 'Canal de voz (si no estás en uno)', required: false, channel_types: [2] },
+      ],
+    },
+    { name: 'stop',  description: 'Detiene la música y desconecta el bot' },
+    { name: 'skip',  description: 'Salta a la siguiente canción en la cola' },
+    { name: 'queue', description: 'Muestra la cola de reproducción actual' },
+  ];
+  const registered = await discordREST(
+    'PUT',
+    `/applications/${c.user.id}/guilds/${GUILD_ID}/commands`,
+    slashCommands,
+  );
+  console.log(`   Slash commands registrados: ${Array.isArray(registered) ? registered.length : '?'}`);
+
   // Refresh cache every 5 min
   setInterval(refreshGuildCache, 5 * 60 * 1000);
 });
@@ -496,6 +630,94 @@ client.on(Events.MessageCreate, async (message: Message) => {
       content: '❌ Error al procesar. ¿Está Ollama corriendo?',
       allowedMentions: { repliedUser: false },
     });
+  }
+});
+
+// ─── Event: Slash commands (music) ────────────────────────────────────────────
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand() || !interaction.guildId) return;
+
+  await interaction.deferReply();
+  const guildId = interaction.guildId;
+
+  switch (interaction.commandName) {
+
+    case 'music': {
+      const member = interaction.member as GuildMember;
+      const voiceChannel: any = member.voice?.channel
+        ?? interaction.options.getChannel('channel');
+
+      if (!voiceChannel?.id) {
+        return void interaction.editReply('❌ Únete a un canal de voz o especifica uno con el parámetro `channel`.');
+      }
+
+      const query = interaction.options.getString('query', true);
+      let track: Track | null;
+      try {
+        track = await resolveTrack(query, interaction.user.username);
+      } catch {
+        return void interaction.editReply('❌ Error buscando el track. Intenta con una URL de YouTube.');
+      }
+      if (!track) return void interaction.editReply('❌ No encontré nada con esa búsqueda.');
+
+      let gp = players.get(guildId);
+      if (!gp) {
+        const connection = joinVoiceChannel({
+          channelId: voiceChannel.id,
+          guildId,
+          adapterCreator: (interaction.guild as any).voiceAdapterCreator,
+        });
+        const player = createAudioPlayer();
+        connection.subscribe(player);
+        player.on(AudioPlayerStatus.Idle, () => { advanceQueue(guildId).catch(console.error); });
+        player.on('error', (err) => { console.error('Player error:', err); advanceQueue(guildId).catch(console.error); });
+        gp = { connection, player, queue: [], textChannelId: interaction.channelId };
+        players.set(guildId, gp);
+      }
+
+      if (gp.current) {
+        gp.queue.push(track);
+        return void interaction.editReply({ embeds: [nowPlayingEmbed(track, true)] });
+      }
+
+      try {
+        await playTrack(gp, track);
+        return void interaction.editReply({ content: '▶️ Iniciando reproducción...', embeds: [] });
+      } catch (err: any) {
+        console.error('playTrack error:', err);
+        players.delete(guildId);
+        gp.connection.destroy();
+        return void interaction.editReply('❌ Error al reproducir. Intenta con otra URL.');
+      }
+    }
+
+    case 'stop': {
+      const gp = players.get(guildId);
+      if (!gp) return void interaction.editReply('❌ No hay música reproduciéndose.');
+      gp.queue = [];
+      gp.player.stop(true);
+      gp.connection.destroy();
+      players.delete(guildId);
+      return void interaction.editReply('⏹️ Música detenida. Hasta luego.');
+    }
+
+    case 'skip': {
+      const gp = players.get(guildId);
+      if (!gp?.current) return void interaction.editReply('❌ No hay nada reproduciéndose.');
+      gp.player.stop(); // dispara Idle → advanceQueue
+      return void interaction.editReply('⏭️ Saltando...');
+    }
+
+    case 'queue': {
+      const gp = players.get(guildId);
+      if (!gp?.current) return void interaction.editReply('📭 La cola está vacía.');
+      const lines = [
+        `🎵 **Ahora:** ${gp.current.title} (${gp.current.duration})`,
+        ...gp.queue.map((t, i) => `${i + 1}. ${t.title} (${t.duration})`),
+      ];
+      return void interaction.editReply(lines.join('\n'));
+    }
   }
 });
 

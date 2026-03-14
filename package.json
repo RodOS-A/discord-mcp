@@ -13,11 +13,14 @@
   },
   "dependencies": {
     "@discordjs/rest": "^2.4.0",
+    "@discordjs/voice": "^0.19.1",
     "@modelcontextprotocol/sdk": "^1.10.0",
     "discord-api-types": "^0.37.97",
     "discord.js": "^14.25.1",
     "dotenv": "^16.4.5",
-    "ollama": "^0.6.3"
+    "ollama": "^0.6.3",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
