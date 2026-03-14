@@ -4,7 +4,7 @@ import {
   AudioPlayerStatus, type VoiceConnection, type AudioPlayer,
 } from '@discordjs/voice';
 import play from 'play-dl';
-import ytdl from '@distube/ytdl-core';
+import { spawn } from 'child_process';
 import { Ollama } from 'ollama';
 import fs from 'fs';
 import path from 'path';
@@ -479,14 +479,25 @@ function nowPlayingEmbed(track: Track, queued = false) {
   };
 }
 
+// Ruta al binario yt-dlp descargado por youtube-dl-exec
+const YTDLP_BIN = path.join(process.cwd(), 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp.exe');
+
 async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
-  // @distube/ytdl-core es más estable que play.stream() con la API actual de YouTube
-  const stream = ytdl(track.url, {
-    filter: 'audioonly',
-    quality: 'highestaudio',
-    highWaterMark: 1 << 25, // 32MB buffer para evitar cortes
+  // yt-dlp es el único que se mantiene actualizado contra los cambios de YouTube
+  // Pipe: yt-dlp stdout → createAudioResource → @discordjs/voice → discord opus
+  const proc = spawn(YTDLP_BIN, [
+    '-f', 'bestaudio[ext=webm]/bestaudio/best',
+    '--no-playlist',
+    '-o', '-',
+    '-q',
+    track.url,
+  ]);
+  proc.stderr.on('data', (d: Buffer) => {
+    const msg = d.toString().trim();
+    if (msg) botLog('ERROR', `yt-dlp stderr: ${msg}`);
   });
-  const resource = createAudioResource(stream);
+  if (!proc.stdout) throw new Error('yt-dlp: no stdout');
+  const resource = createAudioResource(proc.stdout);
   gp.player.play(resource);
   gp.current = track;
   botLog('MUSIC', `Reproduciendo: "${track.title}" (${track.url}) pedido por ${track.requestedBy}`);
