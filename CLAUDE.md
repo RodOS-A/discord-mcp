@@ -4,7 +4,6 @@
 >
 > **Docs detalladas por módulo:**
 > - [CLAUDE_BOT.md](CLAUDE_BOT.md) — Bot de Discord: música, chat, #create, personalidad
-> - [CLAUDE_JARVIS.md](CLAUDE_JARVIS.md) — Jarvis: #claudecode, /pc, logspc, arquitectura
 
 ---
 
@@ -15,9 +14,8 @@ Tres sistemas que corren desde el mismo repo:
 | Sistema | Archivo | Comando | Descripción |
 |---------|---------|---------|-------------|
 | MCP Server | `src/index.ts` | `npm start` | 49 herramientas REST para Claude Desktop via stdio |
-| Gateway Bot | `src/bot.ts` | `npm run start:bot` | Bot Discord: chat IA, música, admin, Jarvis |
+| Gateway Bot | `src/bot.ts` | `npm run start:bot` | Bot Discord: chat IA, música, admin |
 | Config compartida | `src/config.ts` | — | constantes, discordREST, botLog |
-| Jarvis bridge | `src/jarvis.ts` | — | #claudecode → Claude Code CLI → PC |
 
 ---
 
@@ -78,22 +76,28 @@ npm run dev:bot     # Compila + Gateway bot
 ```
 discord-mcp/
 ├── src/
-│   ├── config.ts       # Constantes, botLog, discordREST — importado por bot y jarvis
-│   ├── bot.ts          # Gateway bot — Ollama chat, música, #create, orquesta jarvis
-│   ├── jarvis.ts       # Jarvis bridge — #claudecode, /pc commands, logspc
+│   ├── config.ts       # Constantes, botLog, discordREST — importado por bot
+│   ├── bot.ts          # Gateway bot — Ollama chat, música, #create
 │   └── index.ts        # MCP server — 49 tools, stdio transport
 ├── build/              # Compilado (gitignoreado)
 ├── data/               # memory.json — historial Ollama por canal (gitignoreado)
 ├── logs/               # bot.md — log persistente del bot (gitignoreado)
 ├── .env                # Credenciales reales (gitignoreado)
 ├── CLAUDE.md           # Este archivo — overview general
-├── CLAUDE_BOT.md       # Docs del Discord bot
-└── CLAUDE_JARVIS.md    # Docs del Jarvis bridge
+└── CLAUDE_BOT.md       # Docs del Discord bot
 ```
 
 ---
 
 ## Changelog
+
+### v12.0.0 — 2026-03-14
+- **Jarvis eliminado**: `src/jarvis.ts` y `CLAUDE_JARVIS.md` borrados; todo el PC bridge removido
+- **Fix respuestas**: `strip()` reescrito — extrae el primer párrafo limpio, descarta meta-comentario del modelo
+- **`num_predict: 2048`**: evita cortes de respuesta (era 1024)
+- **Personalidad rediseñada**: casual y útil por defecto; Packgod solo cuando se detectan triggers explícitos (`humilla`, `papea`, `destroza`, etc.) via `isRoastRequest()`
+- **`chatPrompt()` 3 modos**: dev (técnico), roast (Packgod), casual/helpful (default)
+- Slash commands reducidos a: `/music`, `/stop`, `/skip`, `/queue`, `/help`
 
 ### v11.0.0 — 2026-03-14
 - **Refactor arquitectura**: extraído `src/config.ts` (constantes + discordREST + botLog) y `src/jarvis.ts` (Jarvis bridge completo) de `bot.ts`

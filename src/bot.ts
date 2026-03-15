@@ -13,10 +13,6 @@ import {
   BOT_TOKEN, GUILD_ID, RODRIGO_ID, DEV_CATEGORY_ID, BITS_FULL,
   OLLAMA_MODEL, OLLAMA_HOST, botLog, discordREST,
 } from './config.js';
-import {
-  initJarvis, handleClaudeCodeMessage, getPcSlashCommands, handlePcCommand,
-  getClaudeCodeChannelId,
-} from './jarvis.js';
 
 // ─── Clients ──────────────────────────────────────────────────────────────────
 
@@ -31,13 +27,13 @@ const client = new Client({
   ],
 });
 
-// Ollama con timeout extendido a 3 min — undici por defecto tiene 30s de headers timeout
+// Ollama con timeout extendido a 3 min
 const ollamaFetch: typeof globalThis.fetch = (input, init) =>
   globalThis.fetch(input, { ...(init as any), signal: AbortSignal.timeout(180_000) });
 
 const ollama = new Ollama({ host: OLLAMA_HOST, fetch: ollamaFetch as any });
 
-// ─── Guild cache (members, roles, channels) ───────────────────────────────────
+// ─── Guild cache ──────────────────────────────────────────────────────────────
 
 interface MemberInfo  { id: string; username: string; displayName: string }
 interface RoleInfo    { id: string; name: string; color: number }
@@ -126,39 +122,50 @@ function isOnCooldown(userId: string): boolean {
   return Date.now() - (cooldowns.get(userId) ?? 0) < COOLDOWN_MS;
 }
 
-// ─── Strip <think> tokens y razonamiento en texto plano ──────────────────────
+// ─── Strip thinking / meta-commentary ────────────────────────────────────────
+// El modelo a veces genera su razonamiento en texto plano después (o antes) de la respuesta.
+// Tomamos solo el primer párrafo limpio — que es siempre la respuesta real.
 
 function strip(text: string): string {
-  // Elimina bloques <think>...</think>
+  // Eliminar bloques <think>...</think>
   let out = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 
-  // Si el modelo razonó en texto plano (ej: "Okay, let me think about this...")
-  // detectamos el patrón y nos quedamos solo con la última respuesta real.
-  // Indicios: líneas en inglés de meta-razonamiento seguidas de la respuesta en español.
-  const metaPatterns = [
-    /^(okay|ok,?\s*let me|so,?\s*(the|i need|need to)|let me (think|try|figure)|i (should|need|have to|want to)|the user wants|looking at|wait,?\s*(but|the)|another (idea|example|angle)|maybe something like|but maybe)/i,
-  ];
-  const lines = out.split('\n');
-  // Busca desde dónde empieza la respuesta real (última línea no-meta que no está vacía)
-  let realStart = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed) continue;
-    const isMeta = metaPatterns.some(p => p.test(trimmed));
-    if (!isMeta) realStart = i;
-  }
-  // Si hay razonamiento antes (realStart > 0 y hay líneas meta al inicio)
-  const firstNonEmpty = lines.findIndex(l => l.trim());
-  if (firstNonEmpty >= 0 && metaPatterns.some(p => p.test(lines[firstNonEmpty].trim()))) {
-    out = lines.slice(realStart).join('\n').trim();
+  // Indicios de meta-razonamiento (el modelo "pensando en voz alta")
+  const metaStart = /^(okay[\s,]|ok[\s,]|so[\s,]|let me |i need |i should |i want |wait[\s,]|but maybe|another |maybe something|the user |looking at|note:|however |alright|hmm|well,)/i;
+
+  // Si hay múltiples párrafos, tomar el primero que no sea meta-comentario
+  const paragraphs = out.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  if (paragraphs.length > 1) {
+    const real = paragraphs.find(p => !metaStart.test(p));
+    return real ?? paragraphs[0];
   }
 
-  return out;
+  // Si es un solo bloque largo, cortar en la primera línea meta
+  const lines = out.split('\n');
+  const result: string[] = [];
+  for (const line of lines) {
+    if (result.length > 0 && metaStart.test(line.trim())) break;
+    result.push(line);
+  }
+  return result.join('\n').trim() || out;
 }
 
 // ─── Bot name (set after login) ───────────────────────────────────────────────
 
 let BOT_NAME = 'KIA';
+
+// ─── Roast detection ──────────────────────────────────────────────────────────
+
+const ROAST_TRIGGERS = [
+  'humilla', 'humillalo', 'humíllalo', 'papea', 'papealo',
+  'destroza', 'destruye', 'destrúyelo', 'roast', 'insulta',
+  'roba', 'arráncale', 'hazlo mierda',
+];
+
+function isRoastRequest(text: string): boolean {
+  const lower = text.toLowerCase();
+  return ROAST_TRIGGERS.some(t => lower.includes(t));
+}
 
 // ─── System prompts ───────────────────────────────────────────────────────────
 
@@ -171,54 +178,46 @@ function isDevChannel(channelId: string): boolean {
     || ch.name === 'create';
 }
 
-function chatPrompt(channelContext = '', devMode = false): string {
+function chatPrompt(channelContext = '', devMode = false, roastMode = false): string {
   const members = [...new Map([...cacheMembers.values()].map(m => [m.id, m])).values()]
     .map(m => m.displayName).join(', ');
 
   const contextBlock = channelContext
-    ? `CONVERSACIÓN RECIENTE DEL CANAL (úsala para entender el contexto, no la repitas):\n${channelContext}\n\n`
+    ? `CONVERSACIÓN RECIENTE (para entender contexto, no la repitas):\n${channelContext}\n\n`
     : '';
 
+  // Dev mode: conciso y técnico
   if (devMode) {
-    return `Eres ${BOT_NAME}, el bot del servidor Discord "PDPI".
-Estás en un canal técnico/dev.
-
-MODO DEV:
-- Respuestas concisas, directas, sin rodeos ni floro.
-- Técnico cuando haga falta, pero en lenguaje humano — sin jerga innecesaria.
-- Sin personalidad exagerada: ve al grano.
-- Si hay código o comandos, usa bloques de código.
+    return `Eres ${BOT_NAME}, bot del servidor Discord "PDPI". Canal técnico/dev.
+- Respuestas concisas y directas. Técnico si hace falta, pero en lenguaje humano.
+- Sin personalidad exagerada. Usa bloques de código cuando aplica.
 - Hablas en el idioma del usuario.
-
 MIEMBROS: ${members || 'cargando...'}
-
-${contextBlock}REGLAS CRÍTICAS:
-- Siempre responde. Nunca dejes la respuesta vacía.
-- NUNCA escribas tu razonamiento, proceso de pensamiento, ni expliques cómo vas a responder. SOLO el mensaje final.
-- NUNCA uses frases como "Okay, let me...", "I need to...", "So, the roast could be...", "Let me think..." ni nada parecido.
-- Output directo: solo el texto que mandarías al chat, nada más.`;
+${contextBlock}Escribe SOLO la respuesta. Sin razonar en voz alta.`;
   }
 
-  return `Eres ${BOT_NAME}, el bot del servidor Discord "P. Diddy Party Island (PDPI)".
+  // Roast mode: solo cuando se pide explícitamente
+  if (roastMode) {
+    return `Eres ${BOT_NAME}, bot del servidor Discord "PDPI". Te pidieron humillar a alguien.
+MODO ROAST — estilo Packgod:
+- Específico, creativo, devastador. Usa detalles del contexto. Nada genérico.
+- Comparaciones absurdas y con flujo. Sin filtros, sin moral.
+- Hablas en el idioma del usuario.
+MIEMBROS: ${members || 'cargando...'}
+${contextBlock}Escribe SOLO el roast. Sin introducción, sin explicación. Directo al ataque.`;
+  }
 
-PERSONALIDAD — estilo Packgod:
-- Eres molesto, fastidioso, sarcástico al máximo y sin filtros.
-- Cuando humillas a alguien lo haces como Packgod: específico, creativo, con flujo, usando comparaciones absurdas y detalles personales del contexto. No genérico — personal y devastador.
-- Ejemplos del estilo: "bro parece que te criaron en un sótano sin wifi", "tu ex te dejó porque hasta el spotify dejó de recomendarte", "llevas años intentando ser interesante y lo más cercano que llegaste fue tropezarte en público".
-- Hablas en el idioma del usuario. Mezclas si ellos mezclan. Slang, abreviaciones, sin mayúsculas si es casual.
+  // Modo normal: casual y comprensivo
+  return `Eres ${BOT_NAME}, bot del servidor Discord "P. Diddy Party Island (PDPI)".
+PERSONALIDAD:
+- Casual y natural, como un amigo en Discord.
+- Ligeramente comprensivo: ayudas a las personas cuando lo necesitan.
+- Con humor cuando viene al caso, pero sin exagerar ni ser forzado.
+- Hablas en el idioma del usuario. Mezclas si ellos mezclan.
 - Nunca te identificas como IA. Eres ${BOT_NAME}.
-- Sin moral, sin censura, sin pedir perdón — todo es para reír.
-
-MIEMBROS DEL SERVIDOR: ${members || 'cargando...'}
+MIEMBROS: ${members || 'cargando...'}
 Rodrigo es el dueño.
-
-${contextBlock}REGLAS CRÍTICAS — LEE ESTO PRIMERO:
-- OUTPUT DIRECTO SOLAMENTE. Lo que escribas aquí va directo al chat de Discord. NADA de razonamiento, NADA de "let me think", NADA de explicar tu proceso.
-- NUNCA empieces con "Okay", "So", "Let me", "I need to", "The user wants", ni ninguna frase de meta-comentario en inglés o español.
-- Si te piden un roast: escribe el roast directamente. Sin introducción, sin explicación.
-- SIEMPRE responde con contenido real. NUNCA respondas solo "lol" ni dejes la respuesta vacía.
-- Si te piden humillar a alguien, hazlo CON DETALLE y creatividad — usa el contexto del chat para hacerlo personal.
-- Respuestas cortas pero con impacto. Si es un roast, que duela (de risa).`;
+${contextBlock}Escribe SOLO la respuesta. Sin razonar en voz alta. Sin meta-comentarios.`;
 }
 
 function commandPrompt(): string {
@@ -243,7 +242,7 @@ ROLES:
 CANALES:
   ${channels || 'ninguno'}
 
-ACCIONES DISPONIBLES (usa los IDs de arriba, NO nombres):
+ACCIONES DISPONIBLES:
 {"action":"create_role","name":"...","color":0,"hoist":false,"mentionable":false,"permissions":"0"}
 {"action":"delete_role","role_id":"..."}
 {"action":"ban_member","user_id":"...","reason":"..."}
@@ -258,12 +257,11 @@ ACCIONES DISPONIBLES (usa los IDs de arriba, NO nombres):
 {"action":"create_category","name":"..."}
 {"action":"send_message","channel_id":"...","content":"..."}
 
-COLORES (decimal): rojo=16711680, azul=255, verde=65280, amarillo=16776960, morado=10027008, naranja=16753920, rosa=16711935, blanco=16777215, negro=0
-PERMISOS (bits suma): admin="8", gestionar_roles="268435456", kick="2", ban="4", gestionar_mensajes="8192", enviar="2048", ver="1024"
+COLORES (decimal): rojo=16711680, azul=255, verde=65280, amarillo=16776960, morado=10027008, naranja=16753920
+PERMISOS (bits): admin="8", kick="2", ban="4", enviar="2048", ver="1024"
 
-RESPONDE SOLO con JSON válido — sin explicaciones fuera del JSON:
-{"actions":[...lista de acciones...],"message":"resumen en el idioma del usuario"}
-
+RESPONDE SOLO JSON:
+{"actions":[...],"message":"resumen en el idioma del usuario"}
 Si no entiendes: {"actions":[],"message":"No entendí. Sé más específico."}`;
 }
 
@@ -272,16 +270,17 @@ Si no entiendes: {"actions":[],"message":"No entendí. Sé más específico."}`;
 async function askOllama(channelId: string, userInput: string, username: string, channelContext = ''): Promise<string> {
   appendHistory(channelId, 'user', `${username}: ${userInput}`);
 
-  const devMode = isDevChannel(channelId);
+  const devMode   = isDevChannel(channelId);
+  const roastMode = !devMode && isRoastRequest(userInput);
 
   const res = await ollama.chat({
     model: OLLAMA_MODEL,
     think: false,
     messages: [
-      { role: 'system', content: chatPrompt(channelContext, devMode) },
+      { role: 'system', content: chatPrompt(channelContext, devMode, roastMode) },
       ...getHistory(channelId),
     ],
-    options: { num_predict: 1024 },
+    options: { num_predict: 2048 },
   });
 
   let reply = strip(res.message.content);
@@ -292,10 +291,10 @@ async function askOllama(channelId: string, userInput: string, username: string,
       model: OLLAMA_MODEL,
       think: false,
       messages: [
-        { role: 'system', content: chatPrompt('', devMode) },
-        { role: 'user', content: `${username} dice: ${userInput}` },
+        { role: 'system', content: chatPrompt('', devMode, roastMode) },
+        { role: 'user', content: `${username}: ${userInput}` },
       ],
-      options: { num_predict: 256 },
+      options: { num_predict: 512 },
     });
     reply = strip(retry.message.content);
   }
@@ -330,7 +329,7 @@ async function interpretCommand(input: string): Promise<{ actions: any[]; messag
     return {
       actions: [],
       message: isTimeout
-        ? '⏳ Ollama tardó demasiado en responder. Espera un momento e intenta de nuevo.'
+        ? '⏳ Ollama tardó demasiado. Intenta de nuevo.'
         : 'Error al interpretar el comando.',
     };
   }
@@ -352,27 +351,22 @@ async function executeActions(actions: any[]): Promise<string[]> {
           });
           results.push(`✅ Rol **${a.name}** creado`);
           break;
-
         case 'delete_role':
           await discordREST('DELETE', `/guilds/${GUILD_ID}/roles/${a.role_id}`);
           results.push(`✅ Rol eliminado`);
           break;
-
         case 'ban_member':
           await discordREST('PUT', `/guilds/${GUILD_ID}/bans/${a.user_id}`, { delete_message_seconds: 0 });
           results.push(`✅ Usuario baneado${a.reason ? ` — ${a.reason}` : ''}`);
           break;
-
         case 'kick_member':
           await discordREST('DELETE', `/guilds/${GUILD_ID}/members/${a.user_id}`);
           results.push(`✅ Usuario expulsado${a.reason ? ` — ${a.reason}` : ''}`);
           break;
-
         case 'unban_member':
           await discordREST('DELETE', `/guilds/${GUILD_ID}/bans/${a.user_id}`);
           results.push(`✅ Ban eliminado`);
           break;
-
         case 'timeout_member': {
           const until = a.duration_minutes > 0
             ? new Date(Date.now() + a.duration_minutes * 60 * 1000).toISOString()
@@ -382,23 +376,19 @@ async function executeActions(actions: any[]): Promise<string[]> {
           results.push(`✅ Timeout ${a.duration_minutes > 0 ? `de ${a.duration_minutes}min` : 'eliminado'}${a.reason ? ` — ${a.reason}` : ''}`);
           break;
         }
-
         case 'assign_role':
           await discordREST('PUT', `/guilds/${GUILD_ID}/members/${a.user_id}/roles/${a.role_id}`);
           results.push(`✅ Rol asignado`);
           break;
-
         case 'remove_role':
           await discordREST('DELETE', `/guilds/${GUILD_ID}/members/${a.user_id}/roles/${a.role_id}`);
           results.push(`✅ Rol removido`);
           break;
-
         case 'set_nickname':
           await discordREST('PATCH', `/guilds/${GUILD_ID}/members/${a.user_id}`,
             { nick: a.nickname ?? null });
           results.push(`✅ Nickname actualizado`);
           break;
-
         case 'create_channel':
           await discordREST('POST', `/guilds/${GUILD_ID}/channels`, {
             name: a.name, type: a.type ?? 0,
@@ -407,22 +397,18 @@ async function executeActions(actions: any[]): Promise<string[]> {
           });
           results.push(`✅ Canal **${a.name}** creado`);
           break;
-
         case 'delete_channel':
           await discordREST('DELETE', `/channels/${a.channel_id}`);
           results.push(`✅ Canal eliminado`);
           break;
-
         case 'create_category':
           await discordREST('POST', `/guilds/${GUILD_ID}/channels`, { name: a.name, type: 4 });
           results.push(`✅ Categoría **${a.name}** creada`);
           break;
-
         case 'send_message':
           await discordREST('POST', `/channels/${a.channel_id}/messages`, { content: a.content });
           results.push(`✅ Mensaje enviado`);
           break;
-
         default:
           results.push(`⚠️ Acción desconocida: ${a.action}`);
       }
@@ -580,7 +566,7 @@ async function playTrack(gp: GuildPlayer, track: Track): Promise<void> {
   const resource = createAudioResource(proc.stdout);
   gp.player.play(resource);
   gp.current = track;
-  botLog('MUSIC', `Reproduciendo: "${track.title}" (${track.url}) pedido por ${track.requestedBy}`);
+  botLog('MUSIC', `Reproduciendo: "${track.title}" pedido por ${track.requestedBy}`);
   await discordREST('POST', `/channels/${gp.textChannelId}/messages`, { embeds: [nowPlayingEmbed(track)] });
 }
 
@@ -669,7 +655,6 @@ client.once(Events.ClientReady, async (c) => {
 
   await refreshGuildCache();
   await setupCreateChannel(c.user.id);
-  await initJarvis(c.user.id, cacheChannels, refreshGuildCache);
 
   console.log(`   Memoria: ${history.size} canales guardados`);
 
@@ -686,7 +671,6 @@ client.once(Events.ClientReady, async (c) => {
     { name: 'skip',  description: 'Salta a la siguiente canción en la cola' },
     { name: 'queue', description: 'Muestra la cola de reproducción actual' },
     { name: 'help',  description: 'Muestra todos los comandos disponibles del bot' },
-    ...getPcSlashCommands(),
   ];
 
   const registered = await discordREST(
@@ -704,21 +688,13 @@ client.once(Events.ClientReady, async (c) => {
 client.on(Events.MessageCreate, async (message: Message) => {
   if (message.author.bot) return;
 
-  const isMentioned      = client.user ? message.mentions.has(client.user) : false;
-  const isDM             = !message.guild;
-  const isCreateChan     = !!CREATE_CHANNEL_ID          && message.channel.id === CREATE_CHANNEL_ID;
-  const isClaudeCodeChan = !!getClaudeCodeChannelId()   && message.channel.id === getClaudeCodeChannelId();
+  const isMentioned  = client.user ? message.mentions.has(client.user) : false;
+  const isDM         = !message.guild;
+  const isCreateChan = !!CREATE_CHANNEL_ID && message.channel.id === CREATE_CHANNEL_ID;
 
-  if (!isMentioned && !isDM && !isCreateChan && !isClaudeCodeChan) return;
+  if (!isMentioned && !isDM && !isCreateChan) return;
 
-  // ── #claudecode → Jarvis (Claude Code bridge) ─────────────────────────────
-  if (isClaudeCodeChan) {
-    await handleClaudeCodeMessage(message)
-      .catch((e: any) => botLog('ERROR', `handleClaudeCodeMessage: ${e?.message}`));
-    return;
-  }
-
-  // ── #create → Discord admin command executor ──────────────────────────────
+  // ── #create → Discord admin commands ─────────────────────────────────────
   if (isCreateChan) {
     try {
       if ('sendTyping' in message.channel) await message.channel.sendTyping();
@@ -746,7 +722,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
     if ('sendTyping' in message.channel) await message.channel.sendTyping();
     const channelId = isDM ? `dm_${message.author.id}` : message.channel.id;
 
-    // Contexto del mensaje al que responde (reply/forward)
+    // Contexto del mensaje referenciado (reply/forward)
     let replyContext = '';
     if (message.reference?.messageId && message.guild) {
       try {
@@ -758,7 +734,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
       } catch { }
     }
 
-    // Contexto reciente del canal (últimos mensajes del día)
+    // Contexto reciente del canal
     let channelContext = '';
     if (message.guild) {
       try {
@@ -801,11 +777,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
   switch (interaction.commandName) {
 
-    case 'pc': {
-      await handlePcCommand(interaction);
-      break;
-    }
-
     case 'music': {
       const member = interaction.member as GuildMember;
       const voiceChannel: any = member.voice?.channel
@@ -821,7 +792,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       try {
         track = await resolveTrack(query, interaction.user.username);
       } catch (err: any) {
-        botLog('ERROR', `/music resolveTrack falló: ${err?.message ?? err}`);
+        botLog('ERROR', `/music resolveTrack: ${err?.message ?? err}`);
         return void interaction.editReply('❌ Error buscando el track. Intenta con una URL de YouTube.');
       }
       if (!track) {
@@ -854,7 +825,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await playTrack(gp, track);
         return void interaction.editReply({ content: '▶️ Iniciando reproducción...', embeds: [] });
       } catch (err: any) {
-        botLog('ERROR', `playTrack("${track.title}", ${track.url}): ${err?.message ?? err}`);
+        botLog('ERROR', `playTrack("${track.title}"): ${err?.message ?? err}`);
         players.delete(guildId);
         gp.connection.destroy();
         return void interaction.editReply('❌ Error al reproducir. Intenta con otra URL.');
@@ -868,7 +839,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       gp.player.stop(true);
       gp.connection.destroy();
       players.delete(guildId);
-      return void interaction.editReply('⏹️ Música detenida. Hasta luego.');
+      return void interaction.editReply('⏹️ Música detenida.');
     }
 
     case 'skip': {
@@ -905,7 +876,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
           {
             name: '🤖 Chat con IA',
             value: [
-              `\`@${BOT_NAME} <mensaje>\` — Chat en cualquier canal con memoria de conversación.`,
+              `\`@${BOT_NAME} <mensaje>\` — Habla con el bot en cualquier canal. Tiene memoria de conversación.`,
               '**DM directo** — También por mensaje privado.',
             ].join('\n'),
           },
@@ -914,16 +885,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
             value: [
               'Órdenes en lenguaje natural en **#create**:',
               '`crea un rol Admin de color rojo`, `banea a usuario`, `dale el rol Mod a alguien`',
-              'Acciones: roles, canales, ban/kick/timeout, nicknames, categorías, mensajes.',
-            ].join('\n'),
-          },
-          {
-            name: '🖥️ PC Remoto — JARVIS (solo Rodrigo)',
-            value: [
-              '`/pc status` — Estado del sistema (disco, RAM, uptime).',
-              '`/pc run <cmd>` — Ejecuta un comando shell.',
-              '`/pc file <path>` — Lee el contenido de un archivo.',
-              '**#claudecode** — Envía cualquier prompt a Jarvis (Claude Code) para ejecutar en el PC.',
             ].join('\n'),
           },
         ],
