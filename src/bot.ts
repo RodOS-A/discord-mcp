@@ -122,32 +122,11 @@ function isOnCooldown(userId: string): boolean {
   return Date.now() - (cooldowns.get(userId) ?? 0) < COOLDOWN_MS;
 }
 
-// ─── Strip thinking / meta-commentary ────────────────────────────────────────
-// El modelo a veces genera su razonamiento en texto plano después (o antes) de la respuesta.
-// Tomamos solo el primer párrafo limpio — que es siempre la respuesta real.
+// ─── Strip residual think tags ────────────────────────────────────────────────
+// Con think: true, message.content ya llega limpio. Solo por seguridad.
 
 function strip(text: string): string {
-  // Eliminar bloques <think>...</think>
-  let out = text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-
-  // Indicios de meta-razonamiento (el modelo "pensando en voz alta")
-  const metaStart = /^(okay[\s,]|ok[\s,]|so[\s,]|let me |i need |i should |i want |wait[\s,]|but maybe|another |maybe something|the user |looking at|note:|however |alright|hmm|well,)/i;
-
-  // Si hay múltiples párrafos, tomar el primero que no sea meta-comentario
-  const paragraphs = out.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
-  if (paragraphs.length > 1) {
-    const real = paragraphs.find(p => !metaStart.test(p));
-    return real ?? paragraphs[0];
-  }
-
-  // Si es un solo bloque largo, cortar en la primera línea meta
-  const lines = out.split('\n');
-  const result: string[] = [];
-  for (const line of lines) {
-    if (result.length > 0 && metaStart.test(line.trim())) break;
-    result.push(line);
-  }
-  return result.join('\n').trim() || out;
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
 }
 
 // ─── Bot name (set after login) ───────────────────────────────────────────────
@@ -275,7 +254,7 @@ async function askOllama(channelId: string, userInput: string, username: string,
 
   const res = await ollama.chat({
     model: OLLAMA_MODEL,
-    think: false,
+    think: true,
     messages: [
       { role: 'system', content: chatPrompt(channelContext, devMode, roastMode) },
       ...getHistory(channelId),
@@ -289,7 +268,7 @@ async function askOllama(channelId: string, userInput: string, username: string,
     botLog('INFO', `Respuesta vacía, reintentando para: "${userInput.slice(0, 60)}"`);
     const retry = await ollama.chat({
       model: OLLAMA_MODEL,
-      think: false,
+      think: true,
       messages: [
         { role: 'system', content: chatPrompt('', devMode, roastMode) },
         { role: 'user', content: `${username}: ${userInput}` },
